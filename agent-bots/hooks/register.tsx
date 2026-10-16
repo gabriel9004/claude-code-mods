@@ -128,11 +128,18 @@ function mood(status: string): BotMood {
 
 const isEnded = (status: string) => ['completed', 'failed', 'killed'].includes(status)
 
+// Por minutos a propósito: con segundos el panel tendría que redibujarse cada segundo, y cada
+// redibujo reinicia las animaciones de los SVG y repinta los botones (el parpadeo).
 function elapsed(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000))
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  return m < 60 ? `${m}m ${String(s % 60).padStart(2, '0')}s` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
+  const m = Math.floor(Math.max(0, ms) / 60_000)
+  if (m < 1) return '<1 min'
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
+}
+
+// La hora que dibuja el panel solo avanza de minuto en minuto: lo que muestra no tiene más detalle.
+async function tick($: EngineInterface, t: number) {
+  const cur = await read($, now)
+  if (Math.floor(cur / 60_000) !== Math.floor(t / 60_000)) await update($, now, () => t)
 }
 
 function bar(done: number, total: number, width = 16): string {
@@ -286,7 +293,7 @@ let quotaClock: Timer | undefined
 function startQuotaClock($: EngineInterface) {
   if (quotaClock) return
   quotaClock = $.clock.every(60000, () => {
-    void $.clock.now().then(t => update($, now, () => t)).catch(() => {})
+    void $.clock.now().then(t => tick($, t)).catch(() => {})
   })
 }
 
@@ -412,7 +419,7 @@ async function track($: EngineInterface, tool: string, input: Record<string, unk
   const before = await read($, tasks)
 
   await update($, tasks, s.apply)
-  await update($, now, () => t)
+  await tick($, t)
   if (s.fresh || before.length === 0) void $.ui.open({ id: PANE, title: TITLE }).catch(() => {})
   const after = await read($, tasks)
   if (after.some(x => x.status === 'in_progress')) startTicker($)
@@ -440,7 +447,7 @@ async function replay($: EngineInterface) {
   // El historial no trae horas: lo hecho queda sin duración y lo que sigue en curso cuenta desde ahora.
   list = list.map(x => (x.status === 'completed' ? { ...x, startedAt: undefined, endedAt: undefined } : x))
   await update($, tasks, () => list)
-  await update($, now, () => t)
+  await tick($, t)
   if (list.some(x => x.status === 'in_progress')) startTicker($)
 }
 
@@ -494,55 +501,61 @@ function startBeat($: EngineInterface) {
 let seq = 0
 let ticker: Timer | undefined
 
-// Une la lista viva del motor con lo que guardamos al lanzar cada agente.
+// Une la lista viva del motor con lo que guardamos al lanzar cada agente (sin efectos: la usa sync).
+function merge(list: Bot[], infos: AgentInfo[], t: number): Bot[] {
+  const taken = new Set(list.map(b => b.id).filter(Boolean))
+  const next = list.map(b => {
+    if (b.kind === 'shell') return b
+    let info = b.id ? infos.find(i => i.id === b.id) : undefined
+    if (!b.id) {
+      info = infos.find(i => !taken.has(i.id) && i.description === b.description)
+      if (info) taken.add(info.id)
+    }
+    if (!info) return b
+    const ended = isEnded(info.status)
+    return {
+      ...b,
+      id: info.id,
+      status: info.status,
+      endedAt: ended ? (b.endedAt ?? t) : undefined,
+    }
+  })
+  // Adopta los agentes vivos cuyo arranque el mod no vio (lanzados antes de cargarse).
+  // Su modelo no se conoce: salen en gris y sin hora de inicio exacta.
+  for (const info of infos) {
+    if (taken.has(info.id) || isEnded(info.status)) continue
+    taken.add(info.id)
+    next.push({
+      key: `adopted:${info.id}`,
+      kind: 'agent',
+      id: info.id,
+      description: info.description || info.name || info.type,
+      type: info.type,
+      model: '',
+      status: info.status,
+      startedAt: t,
+      lastSeen: t,
+      background: true,
+      action: '👀 Ya estaba en marcha',
+      calls: 0,
+    })
+  }
+  return trim(next)
+}
+
+// Corre cada segundo mientras hay actividad: solo escribe si algo cambió de verdad, porque cada
+// escritura redibuja el panel entero.
 async function sync($: EngineInterface): Promise<boolean> {
   const infos: AgentInfo[] = await $.agent.list()
   const t = await $.clock.now()
-  let active = false
-  await update($, bots, list => {
-    const taken = new Set(list.map(b => b.id).filter(Boolean))
-    const next = list.map(b => {
-      if (b.kind === 'shell') return b
-      let info = b.id ? infos.find(i => i.id === b.id) : undefined
-      if (!b.id) {
-        info = infos.find(i => !taken.has(i.id) && i.description === b.description)
-        if (info) taken.add(info.id)
-      }
-      if (!info) return b
-      const ended = isEnded(info.status)
-      return {
-        ...b,
-        id: info.id,
-        status: info.status,
-        endedAt: ended ? (b.endedAt ?? t) : undefined,
-      }
-    })
-    // Adopta los agentes vivos cuyo arranque el mod no vio (lanzados antes de cargarse).
-    // Su modelo no se conoce: salen en gris y sin hora de inicio exacta.
-    for (const info of infos) {
-      if (taken.has(info.id) || isEnded(info.status)) continue
-      taken.add(info.id)
-      next.push({
-        key: `adopted:${info.id}`,
-        kind: 'agent',
-        id: info.id,
-        description: info.description || info.name || info.type,
-        type: info.type,
-        model: '',
-        status: info.status,
-        startedAt: t,
-        lastSeen: t,
-        background: true,
-        action: '👀 Ya estaba en marcha',
-        calls: 0,
-      })
-    }
-    active = next.some(b => !isEnded(b.status))
-    return trim(next)
-  })
-  await update($, now, () => t)
+  const current = await read($, bots)
+  const seen = merge(current, infos, t)
+  if (JSON.stringify(seen) !== JSON.stringify(current)) {
+    await update($, bots, list => merge(list, infos, t))
+  }
+  await tick($, t)
   await tellEnds($).catch(() => {})
-  return active
+  return seen.some(b => !isEnded(b.status))
 }
 
 // Un solo reloj por carga del módulo; se apaga solo cuando no queda nadie activo.
@@ -778,7 +791,7 @@ export const register: Register = on => {
         }
         const observado = observarTtl(lista[0] === nueva ? undefined : lista[0], nueva, undefined)
         await update($, cacheTtl, () => observado ?? decidirTtl(env, plan).ttl)
-        await update($, now, () => inicio)
+        await tick($, inicio)
       }
     } catch {}
     return r
@@ -980,8 +993,7 @@ export const register: Register = on => {
           {done > 0 && (
             <Button
               key="tasks-toggle-done"
-              plain
-              label={hiding ? `Mostrar hechas (${done})` : 'Ocultar hechas'}
+              label={hiding ? `👁 Mostrar hechas (${done})` : '🙈 Ocultar hechas'}
               onPress={() => {
                 void update($, hideDone, v => !v).catch(() => {})
               }}

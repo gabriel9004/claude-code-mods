@@ -403,7 +403,7 @@ test('un agente sin señales 10 min sale «¿Colgado?» y vuelve a trabajar con 
   await clock.advance(11 * 60_000)
   let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ text: /¿Colgado\?/ })).toBeDefined()
-  expect(await ui.find({ text: /Sin señales hace 11m/ })).toBeDefined()
+  expect(await ui.find({ text: /Sin señales hace 11 min/ })).toBeDefined()
   await ui.unmount()
 
   await $.tool.call({ tool: 'Read', file_path: 'C:/x/a.txt', agentId: 'h1' } as unknown as Parameters<typeof $.tool.call>[0])
