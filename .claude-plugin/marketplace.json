@@ -1,5 +1,6 @@
 {
   "name": "claude-code-mods",
+  "description": "Mods para Claude Code: panel de agentes y tareas con cuota y caché, y banda de uso sobre el prompt.",
   "owner": {
     "name": "Gabriel Sandoval",
     "url": "https://github.com/gabriel9004"
