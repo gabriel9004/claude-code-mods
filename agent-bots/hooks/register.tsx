@@ -768,9 +768,10 @@ export const register: Register = on => {
       : last.leido + last.escrito === 0
         ? 'sin caché'
         : left_ms > 0
-          ? `⏱ ${left_ms < 60000 ? '<1 min' : `${Math.ceil(left_ms / 60000)} min`} de ${ttl === '1h' ? '1 h' : '5 min'}`
+          ? `⏱ ${left_ms < 60000 ? '<1 min' : `${Math.ceil(left_ms / 60000)} min`}`
           : 'vencida'
-    const cacheDetail = last ? `leído ${tokens(last.leido)} · escrito ${tokens(last.escrito)}` : ''
+    // Corto a propósito: un texto más ancho que los de 5 h y semana ensancha la columna y agranda el anillo.
+    const cacheDetail = last ? `${tokens(last.leido)} leído` : ''
 
     return (
       <Box flexDirection="column" gap={1}>

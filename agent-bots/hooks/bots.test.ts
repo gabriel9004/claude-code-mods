@@ -354,8 +354,8 @@ test('el panel de escritorio muestra la caché de la última petición', async (
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ text: /^Caché$/ })).toBeDefined()
-  expect(await ui.find({ text: /60 min de 1 h/ })).toBeDefined()
-  expect(await ui.find({ text: /leído 90k · escrito 9\.5k/ })).toBeDefined()
+  expect(await ui.find({ text: /⏱ 60 min/ })).toBeDefined()
+  expect(await ui.find({ text: /90k leído/ })).toBeDefined()
   await ui.unmount()
 
 })
