@@ -2,6 +2,10 @@
 
 Dos mods para Claude Code que muestran en pantalla lo que normalmente no se ve: qué hacen tus subagentes, cuánto te queda de cuota y cómo va la caché de prompts.
 
+<p align="center"><img src="docs/panel.gif" alt="Panel «Agentes y tareas» de agent-bots con los anillos de cuota de 5 h, semana y caché, y la lista de tareas" width="344"></p>
+
+*El panel de `agent-bots` en la app de escritorio, con tareas de ejemplo.*
+
 > **Aviso:** la API de mods de Claude Code es de acceso anticipado y puede cambiar entre versiones. Probados con Claude Code 2.1.292 y 2.1.299.
 
 | Mod | Qué hace | Dónde se ve |
