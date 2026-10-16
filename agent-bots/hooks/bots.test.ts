@@ -359,3 +359,73 @@ test('el panel de escritorio muestra la caché de la última petición', async (
   await ui.unmount()
 
 })
+
+test('avisa al terminar el plan y al acabar un agente en segundo plano, una sola vez', async ($, on) => {
+  const clock = mock.clock(on)
+  const toasts: string[] = []
+  on('ui.toast', async ($, e) => {
+    toasts.push(String((e as unknown as { text?: string }).text ?? e))
+    return { value: undefined }
+  })
+  on('ui.open', async () => ({ value: { isPlaced: true } }))
+  on('tool.call', async () => ({ result: 'ok' }))
+  let status: 'running' | 'completed' = 'running'
+  on('agent.spawn', async () => ({ model: 'claude-sonnet-5-5', agentId: 'bg1' }))
+  on('agent.list', async () => ({ value: [{ id: 'bg1', description: 'Revisar reportes', type: 'general-purpose', status }] }))
+  const call = (x: Record<string, unknown>) => $.tool.call(x as unknown as Parameters<typeof $.tool.call>[0])
+
+  await call({ tool: 'mcp__ccd_turn__update_plan', items: [{ content: 'A', status: 'in_progress' }, { content: 'B', status: 'pending' }] })
+  await call({ tool: 'mcp__ccd_turn__update_plan', advance: true })
+  expect(toasts.some(t => /Plan terminado/.test(t))).toBe(false)
+  await call({ tool: 'mcp__ccd_turn__update_plan', advance: true })
+  expect(toasts.filter(t => /Plan terminado: 2 tareas/.test(t)).length).toBe(1)
+
+  await $.agent.spawn({
+    tool_use_id: 't9', prompt: 'x', description: 'Revisar reportes', subagentType: 'general-purpose', model: 'sonnet',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: true, fork: false,
+  })
+  await clock.advance(1500)
+  status = 'completed'
+  await clock.advance(1500)
+  await clock.advance(1500)
+  expect(toasts.filter(t => /Agente terminado: Revisar reportes/.test(t)).length).toBe(1)
+})
+
+test('un agente sin señales 10 min sale «¿Colgado?» y vuelve a trabajar con la siguiente herramienta', async ($, on) => {
+  const clock = mock.clock(on)
+  on('tool.call', async () => ({ result: 'ok' }))
+  on('agent.spawn', async () => ({ model: 'claude-sonnet-5-5', agentId: 'h1' }))
+  on('agent.list', async () => ({ value: [{ id: 'h1', description: 'Migrar datos', type: 'general-purpose', status: 'running' }] }))
+  await $.agent.spawn({
+    tool_use_id: 'th', prompt: 'x', description: 'Migrar datos', subagentType: 'general-purpose', model: 'sonnet',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: true, fork: false,
+  })
+  await clock.advance(11 * 60_000)
+  let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ text: /¿Colgado\?/ })).toBeDefined()
+  expect(await ui.find({ text: /Sin señales hace 11m/ })).toBeDefined()
+  await ui.unmount()
+
+  await $.tool.call({ tool: 'Read', file_path: 'C:/x/a.txt', agentId: 'h1' } as unknown as Parameters<typeof $.tool.call>[0])
+  await clock.advance(1000)
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ text: /¿Colgado\?/ })).toBeUndefined()
+  expect(await ui.find({ text: /Trabajando/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('una sola copia cargada no muestra el aviso de duplicado', async ($, on) => {
+  const clock = mock.clock(on)
+  on('session.usage', async () => ({ value: { startedAt: 0, context: { window: 1 }, rateLimits: [] } }))
+  on('session.messages', async () => ({ value: [] }))
+  on('command.register', async () => ({ value: undefined }))
+  on('tool.register', async () => ({ value: undefined }))
+  on('agent.list', async () => ({ value: [] }))
+  on('session.start', async () => ({ cwd: 'C:/x' }))
+  await $.session.start({ cwd: 'C:/x' } as unknown as Parameters<typeof $.session.start>[0])
+  await clock.advance(16_000)
+  await clock.advance(16_000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ text: /cargado dos veces/ })).toBeUndefined()
+  await ui.unmount()
+})

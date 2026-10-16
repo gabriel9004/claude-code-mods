@@ -14,6 +14,18 @@ const limits = atom({ plugin: 'agent-bots', key: 'limits' } as const, [])
 const replayed = atom({ plugin: 'agent-bots', key: 'replayed' } as const, false)
 const samples = atom({ plugin: 'agent-bots', key: 'muestras' } as const, [])
 const cacheTtl = atom({ plugin: 'agent-bots', key: 'ttl' } as const, '5m')
+const copies = atom({ plugin: 'agent-bots', key: 'copias' } as const, [])
+const duplicated = atom({ plugin: 'agent-bots', key: 'duplicado' } as const, false)
+
+// Sin señales en este tiempo, un robot que dice trabajar pasa a «¿Colgado?». Un comando
+// (compilar, una consulta larga) no da señales mientras corre: se le da más margen.
+const STALL_AGENT_MS = 10 * 60_000
+const STALL_SHELL_MS = 20 * 60_000
+
+// Cada carga del módulo es una copia; dos copias vivas cuentan todo doble.
+const INSTANCE = Math.random().toString(36).slice(2, 10)
+const BEAT_MS = 15_000
+const ALIVE_MS = 40_000
 
 // Las dos ventanas de cuota que se dibujan, en este orden.
 const QUOTA: { kind: string; label: string; ramp: [string, string] }[] = [
@@ -402,6 +414,8 @@ async function track($: EngineInterface, tool: string, input: Record<string, unk
   if (s.fresh || before.length === 0) void $.ui.open({ id: PANE, title: TITLE }).catch(() => {})
   const after = await read($, tasks)
   if (after.some(x => x.status === 'in_progress')) startTicker($)
+  const allDone = (l: Task[]) => l.length > 0 && l.every(x => x.status === 'completed')
+  if (allDone(after) && !allDone(before)) toast($, `✅ Plan terminado: ${after.length} tareas`)
 }
 
 // La primera vez que el mod se carga en una sesión, rehace la lista con las llamadas que ya
@@ -426,6 +440,53 @@ async function replay($: EngineInterface) {
   await update($, tasks, () => list)
   await update($, now, () => t)
   if (list.some(x => x.status === 'in_progress')) startTicker($)
+}
+
+function toast($: EngineInterface, text: string) {
+  try {
+    void $.ui.toast(text)
+  } catch {}
+}
+
+// Avisa una sola vez de cada agente en segundo plano o comando que terminó o falló: lo de primer
+// plano no, porque la sesión ya está esperándolo. «told» queda en el estado, así una recarga no repite.
+async function tellEnds($: EngineInterface) {
+  const list = await read($, bots)
+  const fresh = list.filter(b => isEnded(b.status) && !b.told && (b.kind === 'shell' || b.background))
+  if (!fresh.length) return
+  await update($, bots, l => l.map(b => (fresh.some(f => f.key === b.key) ? { ...b, told: true } : b)))
+  for (const b of fresh) {
+    const what = b.kind === 'shell' ? 'Comando' : 'Agente'
+    toast($, b.status === 'completed' ? `✅ ${what} terminado: ${clip(b.description, 50)}` : `💥 ${what} falló: ${clip(b.description, 50)}`)
+  }
+}
+
+// Lo que ya había terminado al cargarse esta versión no se anuncia.
+async function quietEnded($: EngineInterface) {
+  await update($, bots, l => l.map(b => (isEnded(b.status) && !b.told ? { ...b, told: true } : b)))
+}
+
+let beat: Timer | undefined
+
+// Latido de esta copia; si otra copia late a la vez, el panel lo avisa.
+function startBeat($: EngineInterface) {
+  if (beat) return
+  const pulse = async () => {
+    const t = await $.clock.now()
+    let alive = 0
+    await update($, copies, l => {
+      const next = [...l.filter(c => c.id !== INSTANCE && t - c.at < ALIVE_MS), { id: INSTANCE, at: t }]
+      alive = next.length
+      return next
+    })
+    const dup = alive > 1
+    if (dup !== (await read($, duplicated))) {
+      await update($, duplicated, () => dup)
+      if (dup) toast($, '⚠ agent-bots está cargado dos veces: los conteos saldrán dobles')
+    }
+  }
+  beat = $.clock.every(BEAT_MS, () => void pulse().catch(() => {}))
+  void pulse().catch(() => {})
 }
 
 let seq = 0
@@ -468,6 +529,8 @@ async function sync($: EngineInterface): Promise<boolean> {
         model: '',
         status: info.status,
         startedAt: t,
+        lastSeen: t,
+        background: true,
         action: '👀 Ya estaba en marcha',
         calls: 0,
       })
@@ -476,6 +539,7 @@ async function sync($: EngineInterface): Promise<boolean> {
     return trim(next)
   })
   await update($, now, () => t)
+  await tellEnds($).catch(() => {})
   return active
 }
 
@@ -508,6 +572,7 @@ async function settleShells($: EngineInterface, inFlight: readonly { id: string 
         : b,
     ),
   )
+  await tellEnds($).catch(() => {})
 }
 
 // Cuando un comando en segundo plano termina, la sesión recibe un aviso de tarea
@@ -532,12 +597,18 @@ async function finishFromNotice($: EngineInterface, text: string) {
         : b,
     ),
   )
+  await tellEnds($).catch(() => {})
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     ticker = undefined
     quotaClock = undefined
+    beat = undefined
+    // Una copia que arranca borra los latidos viejos: tras una recarga, la copia anterior ya no está.
+    await update($, copies, () => []).catch(() => {})
+    startBeat($)
+    await quietEnded($).catch(() => {})
     // La cuota se lee al arrancar; después llega sola con cada medición.
     await $.session.usage().then(u => readLimits($, u.rateLimits)).catch(() => {})
     await $.command.register({
@@ -587,9 +658,11 @@ export const register: Register = on => {
         model,
         status: 'pending',
         startedAt: await $.clock.now(),
+        background: e.background,
         action: '💭 Pensando…',
         calls: 0,
       }
+      bot.lastSeen = bot.startedAt
       await update($, bots, list => trim([...list, bot]))
       void $.ui.open({ id: PANE, title: TITLE }).catch(() => {})
       startTicker($)
@@ -630,9 +703,12 @@ export const register: Register = on => {
 
     if (agentId) {
       const text = action(e.tool, input)
+      const seen = await $.clock.now()
       void update($, bots, list =>
         list.map(b =>
-          b.id === agentId ? { ...b, action: text, calls: b.calls + 1, status: isEnded(b.status) ? b.status : 'running' } : b,
+          b.id === agentId
+            ? { ...b, action: text, calls: b.calls + 1, lastSeen: seen, status: isEnded(b.status) ? b.status : 'running' }
+            : b,
         ),
       ).catch(() => {})
     }
@@ -658,6 +734,7 @@ export const register: Register = on => {
             action: `⚙️ ${clip(input.command)}`,
             calls: 0,
           }
+          shell.lastSeen = shell.startedAt
           await update($, bots, list => trim([...list.filter(b => b.key !== shell.key), shell]))
           void $.ui.open({ id: PANE, title: TITLE }).catch(() => {})
           startTicker($)
@@ -773,8 +850,20 @@ export const register: Register = on => {
     // Corto a propósito: un texto más ancho que los de 5 h y semana ensancha la columna y agranda el anillo.
     const cacheDetail = last ? `${tokens(last.leido)} leído` : ''
 
+    // Un robot que dice trabajar pero lleva demasiado sin dar señales.
+    const silentFor = (b: Bot) => t - (b.lastSeen ?? b.startedAt)
+    const isStalled = (b: Bot) =>
+      mood(b.status) === 'run' && silentFor(b) > (b.kind === 'shell' ? STALL_SHELL_MS : STALL_AGENT_MS)
+    const stalled = list.filter(isStalled).length
+    const twice = await read($, duplicated)
+
     return (
       <Box flexDirection="column" gap={1}>
+        {twice && (
+          <Text color={WARN[1]} wrap="wrap">
+            ⚠ agent-bots está cargado dos veces (p. ej. una copia en dev-mods y la instalada): los conteos salen dobles. Quita una y recarga.
+          </Text>
+        )}
         {(quota.length > 0 || last) && (
           <Box flexDirection="row" gap={2} justifyContent="space-around" alignItems="flex-start">
             {QUOTA.map(({ kind, label, ramp }) => {
@@ -811,13 +900,16 @@ export const register: Register = on => {
         <Text dimColor>
           {count('run')} trabajando · {count('sleep')} esperando · {count('done')} listos
           {count('fail') ? ` · ${count('fail')} fallidos` : ''}
+          {stalled ? ` · ${stalled} ¿colgados?` : ''}
         </Text>
         {list.length === 0 && (
           <Text dimColor>Ningún agente ni comando todavía. Aparecerán aquí en cuanto se lance uno.</Text>
         )}
         {shown.map(b => {
-          const m = mood(b.status)
-          const [label, color] = LABEL[m]
+          const hung = isStalled(b)
+          // Colgado: se dibuja dormido y en ámbar, con cuánto lleva callado.
+          const m = hung ? 'sleep' : mood(b.status)
+          const [label, color] = hung ? ['¿Colgado?', WARN[1]] : LABEL[m]
           const shell = b.kind === 'shell'
           const who = shell ? 'Comando' : b.model ? modelName(b.model) : 'Modelo desconocido'
           return (
@@ -846,7 +938,9 @@ export const register: Register = on => {
                   </Text>
                 </Text>
                 <Text wrap="truncate-end" dimColor={m !== 'run'}>
-                  {m === 'done' ? '✓ Terminado' : m === 'sleep' && b.calls === 0 ? 'zzz… esperando' : b.action}
+                  {hung
+                    ? `Sin señales hace ${elapsed(silentFor(b))} · ✕ para quitarlo`
+                    : m === 'done' ? '✓ Terminado' : m === 'sleep' && b.calls === 0 ? 'zzz… esperando' : b.action}
                 </Text>
               </Box>
             </Box>

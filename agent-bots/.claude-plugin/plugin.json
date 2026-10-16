@@ -1,6 +1,6 @@
 {
   "name": "agent-bots",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Panel lateral con cada subagente como un robot animado (según su modelo y estado) y, debajo, la lista de tareas de la sesión en vivo",
   "types": "./types/index.d.ts",
   "author": {

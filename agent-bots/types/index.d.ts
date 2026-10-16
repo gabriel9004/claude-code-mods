@@ -16,7 +16,16 @@ export type Bot = {
   endedAt?: number
   action: string
   calls: number
+  // Lanzado en segundo plano: al terminar avisa con una notificación.
+  background?: boolean
+  // Última señal de vida (lanzamiento o herramienta usada), para detectar los colgados.
+  lastSeen?: number
+  // Ya se avisó de su fin.
+  told?: boolean
 }
+
+// Una copia cargada del mod y su último latido.
+export type Copy = { id: string; at: number }
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed'
 
@@ -60,6 +69,8 @@ declare module 'claude-code' {
       now: number
       muestras: Muestra[]
       ttl: Ttl
+      copias: Copy[]
+      duplicado: boolean
     }
   }
 }
