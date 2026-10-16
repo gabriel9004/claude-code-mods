@@ -6,6 +6,8 @@ Dos mods para Claude Code que muestran en pantalla lo que normalmente no se ve: 
 
 *El panel de `agent-bots` en la app de escritorio, con agentes y tareas de ejemplo.*
 
+<p align="center"><a href="docs/brag.mp4"><img src="docs/brag.jpg" alt="Video de presentación de claude-code-mods (23 s)" width="560"></a><br><sub>▶ Ver el video de presentación (23 s)</sub></p>
+
 > **Aviso:** la API de mods de Claude Code es de acceso anticipado y puede cambiar entre versiones. Probados con Claude Code 2.1.292 y 2.1.299.
 
 | Mod | Qué hace | Dónde se ve |
