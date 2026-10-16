@@ -825,6 +825,13 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
+    // Línea divisoria entre secciones: caracteres de caja tenues al ancho del panel, que se ve
+    // igual en la app y en la terminal (no hay borde de un solo lado en los elementos).
+    const rule = (key: string) => (
+      <Text key={key} dimColor wrap="truncate-end">
+        {'─'.repeat(Math.max(8, e.props.bodyColumns || 40))}
+      </Text>
+    )
     const { Box, Text, Button } = els
     const Svg = 'Svg' in els ? els.Svg : undefined
     const list = await read($, bots)
@@ -913,6 +920,7 @@ export const register: Register = on => {
             )}
           </Box>
         )}
+        {(quota.length > 0 || last) && rule('rule:agents')}
         <Text dimColor>
           {count('run')} trabajando · {count('sleep')} esperando · {count('done')} listos
           {count('fail') ? ` · ${count('fail')} fallidos` : ''}
@@ -988,6 +996,7 @@ export const register: Register = on => {
             />
           </Box>
         )}
+        {rule('rule:tasks')}
         <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
           <Text dimColor>Tareas</Text>
           {done > 0 && (

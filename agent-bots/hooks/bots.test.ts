@@ -455,3 +455,16 @@ test('las tareas hechas se ocultan y se vuelven a mostrar sin borrarse', async (
   expect(await ui.find({ text: /Ocultar hechas/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('líneas divisorias entre cuota, agentes y tareas', async ($, on) => {
+  mock.clock(on)
+  on('tool.call', async () => ({ result: 'ok' }))
+  on('ui.open', async () => ({ value: { isPlaced: true } }))
+  await $.tool.call({ tool: 'mcp__ccd_turn__update_plan', items: [{ content: 'Uno', status: 'in_progress' }] } as unknown as Parameters<typeof $.tool.call>[0])
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    // Sin lecturas de cuota no hay línea bajo los anillos; la de tareas siempre está.
+    expect(await ui.find({ text: /^─{40}$/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
