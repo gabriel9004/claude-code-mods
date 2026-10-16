@@ -25,7 +25,8 @@ export type Bot = {
 }
 
 // Una copia cargada del mod y su último latido.
-export type Copy = { id: string; at: number }
+// ev: cuándo procesó su último evento de la sesión (0 si ninguno desde que arrancó).
+export type Copy = { id: string; at: number; ev?: number }
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed'
 
@@ -72,6 +73,9 @@ declare module 'claude-code' {
       copias: Copy[]
       duplicado: boolean
       ocultarHechas: boolean
+      plegarAgentes: boolean
+      plegarTareas: boolean
+      verPendientes: boolean
     }
   }
 }

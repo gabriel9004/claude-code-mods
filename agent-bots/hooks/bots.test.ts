@@ -71,7 +71,7 @@ test('al abrir el panel adopta un agente que ya corría antes de cargarse el mod
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect(await ui.find({ text: /Resumen de pagos del mes/ })).toBeDefined()
-    expect(await ui.find({ text: /Modelo desconocido/ })).toBeDefined()
+    expect(await ui.find({ text: /sin dato/ })).toBeDefined()
     expect(await ui.find({ text: /Ya estaba en marcha/ })).toBeDefined()
     await ui.unmount()
   }
@@ -467,4 +467,58 @@ test('líneas divisorias entre cuota, agentes y tareas', async ($, on) => {
     expect(await ui.find({ text: /^─{40}$/ })).toBeDefined()
     await ui.unmount()
   }
+})
+
+test('la lista enseña la tarea en curso y 5 pendientes; el resto se despliega a demanda', async ($, on) => {
+  mock.clock(on)
+  on('tool.call', async () => ({ result: 'ok' }))
+  on('ui.open', async () => ({ value: { isPlaced: true } }))
+  const items = [{ content: 'Paso en curso', status: 'in_progress' }]
+  for (let i = 1; i <= 8; i++) items.push({ content: `Pendiente ${i}`, status: 'pending' })
+  await $.tool.call({ tool: 'mcp__ccd_turn__update_plan', items } as unknown as Parameters<typeof $.tool.call>[0])
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ text: /Pendiente 5/ })).toBeDefined()
+  expect(await ui.find({ text: /Pendiente 6/ })).toBeUndefined()
+  expect(await ui.find({ text: /\+ 3 pendientes más/ })).toBeDefined()
+  await ui.press({ key: 'tasks-more' })
+  expect(await ui.find({ text: /Pendiente 8/ })).toBeDefined()
+  await ui.press({ key: 'tasks-less' })
+  expect(await ui.find({ text: /Pendiente 8/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('los encabezados pliegan y despliegan cada sección', async ($, on) => {
+  mock.clock(on)
+  on('tool.call', async () => ({ result: 'ok' }))
+  on('ui.open', async () => ({ value: { isPlaced: true } }))
+  await $.tool.call({ tool: 'mcp__ccd_turn__update_plan', items: [{ content: 'Tarea visible', status: 'in_progress' }] } as unknown as Parameters<typeof $.tool.call>[0])
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ text: /Tarea visible/ })).toBeDefined()
+  await ui.press({ key: 'fold-tasks' })
+  expect(await ui.find({ text: /Tarea visible/ })).toBeUndefined()
+  expect(await ui.find({ text: /0\/1 hechas/ })).toBeDefined()
+  await ui.press({ key: 'fold-tasks' })
+  expect(await ui.find({ text: /Tarea visible/ })).toBeDefined()
+
+  expect(await ui.find({ text: /Ningún agente/ })).toBeDefined()
+  await ui.press({ key: 'fold-agents' })
+  expect(await ui.find({ text: /Ningún agente/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('cada agente lleva la etiqueta de su modelo y la leyenda queda visible', async ($, on) => {
+  mock.clock(on)
+  on('agent.spawn', async () => ({ model: 'claude-opus-5-5', agentId: 'o1' }))
+  on('agent.list', async () => ({ value: [{ id: 'o1', description: 'Revisar dividendos', type: 'general-purpose', status: 'running' }] }))
+  await $.agent.spawn({
+    tool_use_id: 'to', prompt: 'x', description: 'Revisar dividendos', subagentType: 'general-purpose', model: 'opus',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
+  })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ text: /^ Opus 5\.5 $/ })).toBeDefined()
+  expect(await ui.find({ text: /sin dato/ })).toBeDefined()
+  expect(await ui.find({ text: /Limpiar agentes/ })).toBeDefined()
+  await ui.unmount()
 })

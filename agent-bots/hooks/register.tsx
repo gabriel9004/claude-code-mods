@@ -18,6 +18,12 @@ const copies = atom({ plugin: 'agent-bots', key: 'copias' } as const, [])
 const duplicated = atom({ plugin: 'agent-bots', key: 'duplicado' } as const, false)
 // Las tareas hechas se pueden ocultar sin borrarlas; la elección dura toda la sesión, recargas incluidas.
 const hideDone = atom({ plugin: 'agent-bots', key: 'ocultarHechas' } as const, false)
+// Cada sección se puede plegar desde su encabezado.
+const foldAgents = atom({ plugin: 'agent-bots', key: 'plegarAgentes' } as const, false)
+const foldTasks = atom({ plugin: 'agent-bots', key: 'plegarTareas' } as const, false)
+// Con planes largos solo se ven las próximas pendientes; el resto, a demanda.
+const allPending = atom({ plugin: 'agent-bots', key: 'verPendientes' } as const, false)
+const PENDING_PREVIEW = 5
 
 // Sin señales en este tiempo, un robot que dice trabajar pasa a «¿Colgado?». Un comando
 // (compilar, una consulta larga) no da señales mientras corre: se le da más margen.
@@ -252,6 +258,27 @@ function gauge(pct: number, ramp: [string, string], id: string, warn = true): st
   )
 }
 
+// Etiqueta de cada robot: el nombre del modelo sobre su color, legible sin mirar la leyenda.
+function modelChip(b: Bot): { text: string; ramp: Ramp } {
+  if (b.kind === 'shell') return { text: 'Comando', ramp: SHELL }
+  if (!b.model) return { text: 'sin dato', ramp: RAMP.other }
+  return { text: modelName(b.model), ramp: RAMP[family(b.model)] }
+}
+
+// Barra de avance de las tareas, redondeada y con el degradado de los anillos (estática: sin SMIL).
+function progressBar(frac: number, complete: boolean): string {
+  const w = 220
+  const f = Math.round(w * Math.max(0, Math.min(1, frac)))
+  const [a, b] = complete ? ['#97C459', '#639922'] : ['#85B7EB', '#378ADD']
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="10" viewBox="0 0 ${w} 10">` +
+    `<defs><linearGradient id="pb" x1="0" x2="1"><stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/></linearGradient></defs>` +
+    `<rect x="0" y="1" width="${w}" height="8" rx="4" fill="#888780" fill-opacity="0.22"/>` +
+    (f > 0 ? `<rect x="0" y="1" width="${Math.max(8, f)}" height="8" rx="4" fill="url(#pb)"/>` : '') +
+    `</svg>`
+  )
+}
+
 function bar10(pct: number): string {
   const full = Math.round(Math.max(0, Math.min(100, pct)) / 10)
   return '█'.repeat(full) + '░'.repeat(10 - full)
@@ -476,16 +503,24 @@ async function quietEnded($: EngineInterface) {
 }
 
 let beat: Timer | undefined
+// Cuándo arrancó esta copia y cuándo procesó su último evento de la sesión.
+let bornAt = 0
+let lastEvent = 0
 
-// Latido de esta copia; si otra copia late a la vez, el panel lo avisa.
+// Latido de esta copia; si otra copia late a la vez, el panel lo avisa. Solo cuenta una copia que
+// procesó eventos después de que arrancara esta: al recargar, la copia vieja aún da un último
+// latido antes de apagarse, pero ya no recibe eventos, y eso no es un duplicado.
 function startBeat($: EngineInterface) {
   if (beat) return
   const pulse = async () => {
     const t = await $.clock.now()
     let alive = 0
     await update($, copies, l => {
-      const next = [...l.filter(c => c.id !== INSTANCE && t - c.at < ALIVE_MS), { id: INSTANCE, at: t }]
-      alive = next.length
+      const next = [
+        ...l.filter(c => c.id !== INSTANCE && t - c.at < ALIVE_MS),
+        { id: INSTANCE, at: t, ev: lastEvent },
+      ]
+      alive = next.filter(c => (c.ev ?? 0) > bornAt).length
       return next
     })
     const dup = alive > 1
@@ -620,6 +655,8 @@ export const register: Register = on => {
     ticker = undefined
     quotaClock = undefined
     beat = undefined
+    bornAt = await $.clock.now()
+    lastEvent = 0
     // Una copia que arranca borra los latidos viejos: tras una recarga, la copia anterior ya no está.
     await update($, copies, () => []).catch(() => {})
     startBeat($)
@@ -699,6 +736,7 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
+    void $.clock.now().then(t => (lastEvent = t)).catch(() => {})
     // Los parámetros de la herramienta vienen en el propio evento.
     const input = e as unknown as Record<string, unknown>
     const agentId = e.agentId
@@ -879,6 +917,20 @@ export const register: Register = on => {
       mood(b.status) === 'run' && silentFor(b) > (b.kind === 'shell' ? STALL_SHELL_MS : STALL_AGENT_MS)
     const stalled = list.filter(isStalled).length
     const twice = await read($, duplicated)
+    const foldA = await read($, foldAgents)
+    const foldT = await read($, foldTasks)
+    const showAll = await read($, allPending)
+
+    // Qué tareas se dibujan: las hechas (salvo ocultas), la en curso y las próximas pendientes.
+    const pendingCount = todo.filter(x => x.status === 'pending').length
+    let pendingShown = 0
+    const visibleTasks = todo.filter(x => {
+      if (x.status === 'completed') return !hiding
+      if (x.status === 'in_progress') return true
+      pendingShown += 1
+      return showAll || pendingShown <= PENDING_PREVIEW
+    })
+    const hiddenPending = showAll ? 0 : Math.max(0, pendingCount - PENDING_PREVIEW)
 
     return (
       <Box flexDirection="column" gap={1}>
@@ -921,84 +973,109 @@ export const register: Register = on => {
           </Box>
         )}
         {(quota.length > 0 || last) && rule('rule:agents')}
-        <Text dimColor>
-          {count('run')} trabajando · {count('sleep')} esperando · {count('done')} listos
-          {count('fail') ? ` · ${count('fail')} fallidos` : ''}
-          {stalled ? ` · ${stalled} ¿colgados?` : ''}
-        </Text>
-        {list.length === 0 && (
-          <Text dimColor>Ningún agente ni comando todavía. Aparecerán aquí en cuanto se lance uno.</Text>
-        )}
-        {shown.map(b => {
-          const hung = isStalled(b)
-          // Colgado: se dibuja dormido y en ámbar, con cuánto lleva callado.
-          const m = hung ? 'sleep' : mood(b.status)
-          const [label, color] = hung ? ['¿Colgado?', WARN[1]] : LABEL[m]
-          const shell = b.kind === 'shell'
-          const who = shell ? 'Comando' : b.model ? modelName(b.model) : 'Modelo desconocido'
-          return (
-            <Box key={b.key} flexDirection="row" gap={1} alignItems="center">
-              {Svg ? (
-                <Svg source={robot(m, b.model, b.kind)} alt={`Robot ${label.toLowerCase()}`} width={56} height={56} isInteractive />
-              ) : (
-                <Text>{shell && m === 'run' ? '⚙️' : GLYPH[m]}</Text>
-              )}
-              <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-                <Box flexDirection="row" justifyContent="space-between" gap={1}>
-                  <Text bold wrap="truncate-end">{b.description}</Text>
-                  <Button
-                    key={`x:${b.key}`}
-                    plain
-                    label="✕"
-                    onPress={() => {
-                      void update($, bots, l => l.filter(one => one.key !== b.key)).catch(() => {})
-                    }}
-                  />
-                </Box>
-                <Text wrap="truncate-end">
-                  <Text color={color}>{label}</Text>
-                  <Text dimColor>
-                    {' · '}{who} · {elapsed((b.endedAt ?? t) - b.startedAt)}{shell ? '' : ` · ${b.calls} herramientas`}
-                  </Text>
-                </Text>
-                <Text wrap="truncate-end" dimColor={m !== 'run'}>
-                  {hung
-                    ? `Sin señales hace ${elapsed(silentFor(b))} · ✕ para quitarlo`
-                    : m === 'done' ? '✓ Terminado' : m === 'sleep' && b.calls === 0 ? 'zzz… esperando' : b.action}
-                </Text>
-              </Box>
-            </Box>
-          )
-        })}
-        <Box flexDirection="row" justifyContent="space-between" alignItems="center">
-          <Text dimColor>
-            <Text color={RAMP.opus[1]}>●</Text> Opus <Text color={RAMP.sonnet[1]}>●</Text> Sonnet{' '}
-            <Text color={RAMP.haiku[1]}>●</Text> Haiku <Text color={SHELL[1]}>●</Text> Comando
-          </Text>
-        </Box>
-        {list.length > 0 && (
-          <Box flexDirection="row" gap={1} justifyContent="flex-end">
-            {ended && (
-              <Button
-                key="clear"
-                label="Quitar terminados"
-                onPress={() => {
-                  void update($, bots, l => l.filter(b => !isEnded(b.status))).catch(() => {})
-                }}
-              />
-            )}
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+          <Box flexDirection="row" alignItems="center" gap={1} flexShrink={1}>
+            <Button
+              key="fold-agents"
+              plain
+              label={`${foldA ? '▸' : '▾'} Agentes`}
+              onPress={() => {
+                void update($, foldAgents, v => !v).catch(() => {})
+              }}
+            />
+            <Text dimColor wrap="truncate-end">
+              · {count('run')} trabajando · {count('sleep')} esperando · {count('done')} listos
+              {count('fail') ? ` · ${count('fail')} fallidos` : ''}
+              {stalled ? ` · ${stalled} ¿colgados?` : ''}
+            </Text>
+          </Box>
+          {list.length > 0 && (
             <Button
               key="clear-all"
-              label="Limpiar todo"
+              label="Limpiar agentes"
               onPress={() => {
                 void update($, bots, () => []).catch(() => {})
+              }}
+            />
+          )}
+        </Box>
+        {!foldA && list.length > 0 && (
+          <Text dimColor wrap="truncate-end">
+            <Text color={RAMP.opus[1]}>●</Text> Opus{'  '}<Text color={RAMP.sonnet[1]}>●</Text> Sonnet{'  '}
+            <Text color={RAMP.haiku[1]}>●</Text> Haiku{'  '}<Text color={SHELL[1]}>⚙</Text> Comando{'  '}
+            <Text color={RAMP.other[1]}>●</Text> sin dato
+          </Text>
+        )}
+        {!foldA && list.length === 0 && (
+          <Text dimColor>Ningún agente ni comando todavía. Aparecerán aquí en cuanto se lance uno.</Text>
+        )}
+        {!foldA &&
+          shown.map(b => {
+            const hung = isStalled(b)
+            // Colgado: se dibuja dormido y en ámbar, con cuánto lleva callado.
+            const m = hung ? 'sleep' : mood(b.status)
+            const [label, color] = hung ? ['¿Colgado?', WARN[1]] : LABEL[m]
+            const shell = b.kind === 'shell'
+            const chip = modelChip(b)
+            return (
+              <Box key={b.key} flexDirection="row" gap={1} alignItems="center">
+                {Svg ? (
+                  <Svg source={robot(m, b.model, b.kind)} alt={`Robot ${label.toLowerCase()}`} width={52} height={52} isInteractive />
+                ) : (
+                  <Text>{shell && m === 'run' ? '⚙️' : GLYPH[m]}</Text>
+                )}
+                <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+                  <Box flexDirection="row" justifyContent="space-between" gap={1}>
+                    <Text bold wrap="truncate-end">{b.description}</Text>
+                    <Button
+                      key={`x:${b.key}`}
+                      plain
+                      label="✕"
+                      onPress={() => {
+                        void update($, bots, l => l.filter(one => one.key !== b.key)).catch(() => {})
+                      }}
+                    />
+                  </Box>
+                  <Text wrap="truncate-end">
+                    <Text color={color}>{label}</Text>{' '}
+                    <Text backgroundColor={chip.ramp[0]} color={chip.ramp[2]}>{` ${chip.text} `}</Text>
+                    <Text dimColor>
+                      {' · '}{elapsed((b.endedAt ?? t) - b.startedAt)}{shell ? '' : ` · ${b.calls} 🔧`}
+                    </Text>
+                  </Text>
+                  <Text wrap="truncate-end" dimColor={m !== 'run'}>
+                    {hung
+                      ? `Sin señales hace ${elapsed(silentFor(b))} · ✕ para quitarlo`
+                      : m === 'done' ? '✓ Terminado' : m === 'sleep' && b.calls === 0 ? 'zzz… esperando' : b.action}
+                  </Text>
+                </Box>
+              </Box>
+            )
+          })}
+        {!foldA && ended && (
+          <Box flexDirection="row" justifyContent="flex-end">
+            <Button
+              key="clear"
+              label="Quitar terminados"
+              onPress={() => {
+                void update($, bots, l => l.filter(b => !isEnded(b.status))).catch(() => {})
               }}
             />
           </Box>
         )}
         {rule('rule:tasks')}
         <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
-          <Text dimColor>Tareas</Text>
+          <Box flexDirection="row" alignItems="center" gap={1} flexShrink={1}>
+            <Button
+              key="fold-tasks"
+              plain
+              label={`${foldT ? '▸' : '▾'} Tareas`}
+              onPress={() => {
+                void update($, foldTasks, v => !v).catch(() => {})
+              }}
+            />
+            {todo.length > 0 && <Text dimColor wrap="truncate-end">· {done}/{todo.length} hechas · {pct}%</Text>}
+          </Box>
           {done > 0 && (
             <Button
               key="tasks-toggle-done"
@@ -1009,47 +1086,73 @@ export const register: Register = on => {
             />
           )}
         </Box>
-        <Box flexDirection="row" gap={1} alignItems="center">
-          {Svg ? (
-            <Svg source={robot(tmood, 'sonnet')} alt={`Robot ${LABEL[tmood][0].toLowerCase()}`} width={52} height={52} isInteractive />
-          ) : (
-            <Text>{GLYPH[tmood]}</Text>
-          )}
-          <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-            <Text bold wrap="truncate-end">
-              {todo.length === 0 ? 'Sin tareas todavía' : `${done}/${todo.length} hechas · ${pct}%`}
-            </Text>
-            {todo.length > 0 && <Text color={tmood === 'done' ? '#639922' : '#378ADD'}>{bar(done, todo.length)}</Text>}
-            <Text dimColor wrap="truncate-end">
-              {todo.length === 0
-                ? 'Aparecerán aquí cuando se arme un plan.'
-                : `${doing.length} en curso · ${left} pendientes${since === Infinity ? '' : ` · ${elapsed(t - since)}`}`}
-            </Text>
-          </Box>
-        </Box>
-        {todo.filter(x => !(hiding && x.status === 'completed')).map(x => {
-          const [label, color] = TASK_LABEL[x.status]
-          const active = x.status === 'in_progress'
-          return (
-            <Box key={x.key} flexDirection="row" gap={1} alignItems="center">
-              {Svg ? (
-                <Svg source={taskMark(x.status)} alt={label} width={22} height={22} />
-              ) : (
-                <Text>{TASK_GLYPH[x.status]}</Text>
-              )}
-              <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-                <Text bold={active} dimColor={!active} wrap="truncate-end">
-                  {x.content}
-                </Text>
-                <Text wrap="truncate-end">
-                  <Text color={color}>{label}</Text>
-                  {x.startedAt !== undefined && <Text dimColor>{' · '}{elapsed((x.endedAt ?? t) - x.startedAt)}</Text>}
-                </Text>
-              </Box>
+        {!foldT && (
+          <Box flexDirection="row" gap={1} alignItems="center">
+            {Svg ? (
+              <Svg source={robot(tmood, 'sonnet')} alt={`Robot ${LABEL[tmood][0].toLowerCase()}`} width={48} height={48} isInteractive />
+            ) : (
+              <Text>{GLYPH[tmood]}</Text>
+            )}
+            <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+              {todo.length === 0 && <Text bold>Sin tareas todavía</Text>}
+              {todo.length > 0 &&
+                (Svg ? (
+                  <Svg source={progressBar(done / todo.length, tmood === 'done')} alt={`${pct} % hecho`} width={220} height={10} />
+                ) : (
+                  <Text color={tmood === 'done' ? '#639922' : '#378ADD'}>{bar(done, todo.length)}</Text>
+                ))}
+              <Text dimColor wrap="truncate-end">
+                {todo.length === 0
+                  ? 'Aparecerán aquí cuando se arme un plan.'
+                  : `${doing.length} en curso · ${left} pendientes${since === Infinity ? '' : ` · ⏱ ${elapsed(t - since)} desde el inicio`}`}
+              </Text>
             </Box>
-          )
-        })}
-        {todo.length > 0 && (
+          </Box>
+        )}
+        {!foldT &&
+          visibleTasks.map(x => {
+            const [label, color] = TASK_LABEL[x.status]
+            const active = x.status === 'in_progress'
+            return (
+              <Box key={x.key} flexDirection="row" gap={1} alignItems="center">
+                {Svg ? (
+                  <Svg source={taskMark(x.status)} alt={label} width={22} height={22} />
+                ) : (
+                  <Text>{TASK_GLYPH[x.status]}</Text>
+                )}
+                <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+                  <Text bold={active} dimColor={!active} wrap={active ? 'wrap' : 'truncate-end'}>
+                    {x.content}
+                  </Text>
+                  <Text wrap="truncate-end">
+                    <Text color={color}>{label}</Text>
+                    {x.startedAt !== undefined && <Text dimColor>{' · '}{elapsed((x.endedAt ?? t) - x.startedAt)}</Text>}
+                  </Text>
+                </Box>
+              </Box>
+            )
+          })}
+        {!foldT && hiddenPending > 0 && (
+          <Button
+            key="tasks-more"
+            plain
+            label={`+ ${hiddenPending} pendientes más ▾`}
+            onPress={() => {
+              void update($, allPending, () => true).catch(() => {})
+            }}
+          />
+        )}
+        {!foldT && showAll && pendingCount > PENDING_PREVIEW && (
+          <Button
+            key="tasks-less"
+            plain
+            label="− Mostrar menos ▴"
+            onPress={() => {
+              void update($, allPending, () => false).catch(() => {})
+            }}
+          />
+        )}
+        {!foldT && todo.length > 0 && (
           <Box flexDirection="row" gap={1} justifyContent="flex-end">
             {done > 0 && (
               <Button
