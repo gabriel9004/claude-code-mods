@@ -1,0 +1,19 @@
+{
+  "name": "claude-code-mods",
+  "owner": {
+    "name": "Gabriel Sandoval",
+    "url": "https://github.com/gabriel9004"
+  },
+  "plugins": [
+    {
+      "name": "agent-bots",
+      "source": "./agent-bots",
+      "description": "Panel lateral con cada subagente como un robot animado, la lista de tareas en vivo y anillos de cuota (5 h, semana) y caché de prompts"
+    },
+    {
+      "name": "medidor",
+      "source": "./medidor",
+      "description": "Banda sobre el prompt con modelo, contexto, límites de 5 h y semana, caché de prompts, costo y duración"
+    }
+  ]
+}

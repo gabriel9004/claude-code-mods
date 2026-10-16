@@ -1,0 +1,12 @@
+{
+  "name": "medidor",
+  "version": "0.1.0",
+  "description": "Banda sobre el prompt: modelo, esfuerzo, contexto, límites de 5 h y semanal con su reinicio, costo y duración de la sesión",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Gabriel Sandoval",
+    "url": "https://github.com/gabriel9004"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/gabriel9004/claude-code-mods"
+}

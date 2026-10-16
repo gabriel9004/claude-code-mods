@@ -1,0 +1,12 @@
+{
+  "name": "agent-bots",
+  "version": "0.6.0",
+  "description": "Panel lateral con cada subagente como un robot animado (según su modelo y estado) y, debajo, la lista de tareas de la sesión en vivo",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Gabriel Sandoval",
+    "url": "https://github.com/gabriel9004"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/gabriel9004/claude-code-mods"
+}
