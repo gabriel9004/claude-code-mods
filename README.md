@@ -12,7 +12,7 @@ Dos mods para Claude Code que muestran en pantalla lo que normalmente no se ve: 
 
 | Mod | Qué hace | Dónde se ve |
 | --- | --- | --- |
-| [`agent-bots`](agent-bots) | Panel lateral «Agentes y tareas»: cada subagente (y cada comando en segundo plano) como un robot animado, la lista de tareas de la sesión en vivo y tres anillos: cuota de 5 h, cuota semanal y caché de prompts. Avisa al terminar el plan o un agente en segundo plano, marca «¿Colgado?» al robot que lleva demasiado sin señales y advierte si el mod está cargado dos veces | App de escritorio (en terminal, versión de texto) |
+| [`agent-bots`](agent-bots) | Panel lateral «Agentes y tareas»: cada subagente (y cada comando en segundo plano) como un robot animado, la lista de tareas de la sesión en vivo (con las hechas ocultables) y tres anillos: cuota de 5 h, cuota semanal y caché de prompts. Avisa al terminar el plan o un agente en segundo plano, marca «¿Colgado?» al robot que lleva demasiado sin señales y advierte si el mod está cargado dos veces | App de escritorio (en terminal, versión de texto) |
 | [`medidor`](medidor) | Banda sobre el prompt: modelo y esfuerzo, contexto, límites de 5 h y semana con su reinicio, costo, duración y estado de la caché con cuenta regresiva | Terminal |
 
 Los dos se complementan: `medidor` solo dibuja en la terminal y `agent-bots` hace lo mismo en la app de escritorio. Puedes instalar solo uno.

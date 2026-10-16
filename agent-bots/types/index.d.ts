@@ -71,6 +71,7 @@ declare module 'claude-code' {
       ttl: Ttl
       copias: Copy[]
       duplicado: boolean
+      ocultarHechas: boolean
     }
   }
 }

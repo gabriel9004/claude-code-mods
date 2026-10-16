@@ -16,6 +16,8 @@ const samples = atom({ plugin: 'agent-bots', key: 'muestras' } as const, [])
 const cacheTtl = atom({ plugin: 'agent-bots', key: 'ttl' } as const, '5m')
 const copies = atom({ plugin: 'agent-bots', key: 'copias' } as const, [])
 const duplicated = atom({ plugin: 'agent-bots', key: 'duplicado' } as const, false)
+// Las tareas hechas se pueden ocultar sin borrarlas; la elección dura toda la sesión, recargas incluidas.
+const hideDone = atom({ plugin: 'agent-bots', key: 'ocultarHechas' } as const, false)
 
 // Sin señales en este tiempo, un robot que dice trabajar pasa a «¿Colgado?». Un comando
 // (compilar, una consulta larga) no da señales mientras corre: se le da más margen.
@@ -823,6 +825,7 @@ export const register: Register = on => {
     const ended = list.some(b => isEnded(b.status))
 
     const todo = await read($, tasks)
+    const hiding = await read($, hideDone)
     const done = todo.filter(x => x.status === 'completed').length
     const doing = todo.filter(x => x.status === 'in_progress')
     const left = todo.length - done - doing.length
@@ -972,7 +975,19 @@ export const register: Register = on => {
             />
           </Box>
         )}
-        <Text dimColor>Tareas</Text>
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+          <Text dimColor>Tareas</Text>
+          {done > 0 && (
+            <Button
+              key="tasks-toggle-done"
+              plain
+              label={hiding ? `Mostrar hechas (${done})` : 'Ocultar hechas'}
+              onPress={() => {
+                void update($, hideDone, v => !v).catch(() => {})
+              }}
+            />
+          )}
+        </Box>
         <Box flexDirection="row" gap={1} alignItems="center">
           {Svg ? (
             <Svg source={robot(tmood, 'sonnet')} alt={`Robot ${LABEL[tmood][0].toLowerCase()}`} width={52} height={52} isInteractive />
@@ -991,7 +1006,7 @@ export const register: Register = on => {
             </Text>
           </Box>
         </Box>
-        {todo.map(x => {
+        {todo.filter(x => !(hiding && x.status === 'completed')).map(x => {
           const [label, color] = TASK_LABEL[x.status]
           const active = x.status === 'in_progress'
           return (

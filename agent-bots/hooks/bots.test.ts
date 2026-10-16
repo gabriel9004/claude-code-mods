@@ -429,3 +429,29 @@ test('una sola copia cargada no muestra el aviso de duplicado', async ($, on) =>
   expect(await ui.find({ text: /cargado dos veces/ })).toBeUndefined()
   await ui.unmount()
 })
+
+test('las tareas hechas se ocultan y se vuelven a mostrar sin borrarse', async ($, on) => {
+  mock.clock(on)
+  on('tool.call', async () => ({ result: 'ok' }))
+  on('ui.open', async () => ({ value: { isPlaced: true } }))
+  await $.tool.call({
+    tool: 'mcp__ccd_turn__update_plan',
+    items: [
+      { content: 'Uno hecho', status: 'completed' },
+      { content: 'Dos hecho', status: 'completed' },
+      { content: 'Tres en curso', status: 'in_progress' },
+    ],
+  } as unknown as Parameters<typeof $.tool.call>[0])
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ text: /Uno hecho/ })).toBeDefined()
+  await ui.press({ key: 'tasks-toggle-done' })
+  expect(await ui.find({ text: /Uno hecho/ })).toBeUndefined()
+  expect(await ui.find({ text: /Tres en curso/ })).toBeDefined()
+  expect(await ui.find({ text: /2\/3 hechas/ })).toBeDefined()
+  expect(await ui.find({ text: /Mostrar hechas \(2\)/ })).toBeDefined()
+  await ui.press({ key: 'tasks-toggle-done' })
+  expect(await ui.find({ text: /Dos hecho/ })).toBeDefined()
+  expect(await ui.find({ text: /Ocultar hechas/ })).toBeDefined()
+  await ui.unmount()
+})
