@@ -1,7 +1,7 @@
 {
   "name": "agent-bots",
-  "version": "0.7.0",
-  "description": "Panel lateral con cada subagente como un robot animado (según su modelo y estado) y, debajo, la lista de tareas de la sesión en vivo",
+  "version": "0.8.0",
+  "description": "Panel lateral de agentes y tareas: qué está haciendo ahora, presupuesto (5 h, semana, contexto y caché), agentes desplegables con historial y acciones, el plan y los cambios en git",
   "types": "./types/index.d.ts",
   "author": {
     "name": "Gabriel Sandoval",

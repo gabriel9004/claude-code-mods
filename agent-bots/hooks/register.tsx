@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Bot, BotKind, BotMood, Limit, Muestra, Task, TaskStatus } from '../types'
+import type { Bot, BotKind, BotMood, Change, Changes, Ctx, Limit, Muestra, Task, TaskStatus } from '../types'
 import { aciertos, decidirTtl, observarTtl, restanteMs, tokens } from './cache'
 
 const PANE = 'agent-bots'
@@ -24,6 +24,24 @@ const foldTasks = atom({ plugin: 'agent-bots', key: 'plegarTareas' } as const, f
 // Con planes largos solo se ven las próximas pendientes; el resto, a demanda.
 const allPending = atom({ plugin: 'agent-bots', key: 'verPendientes' } as const, false)
 const PENDING_PREVIEW = 5
+const foldBudget = atom({ plugin: 'agent-bots', key: 'plegarPresupuesto' } as const, false)
+const foldChanges = atom({ plugin: 'agent-bots', key: 'plegarCambios' } as const, false)
+// Los agentes terminados se pliegan en «Ver N listos»: la atención va a lo que sigue activo.
+const showEnded = atom({ plugin: 'agent-bots', key: 'verListos' } as const, false)
+const context = atom({ plugin: 'agent-bots', key: 'contexto' } as const, null)
+const changes = atom({ plugin: 'agent-bots', key: 'cambios' } as const, null)
+const diffView = atom({ plugin: 'agent-bots', key: 'diff' } as const, null)
+// Agente desplegado y acción que espera confirmación («turn», «clear» o «stop:<clave>»).
+const opened = atom({ plugin: 'agent-bots', key: 'abierto' } as const, null)
+const confirming = atom({ plugin: 'agent-bots', key: 'confirmar' } as const, null)
+// El hilo principal está en un turno; su modelo y lo último que hizo.
+const busy = atom({ plugin: 'agent-bots', key: 'ocupado' } as const, false)
+const mainModel = atom({ plugin: 'agent-bots', key: 'modelo' } as const, '')
+const mainAction = atom({ plugin: 'agent-bots', key: 'accion' } as const, '')
+const LOG_KEEP = 6
+const CTX_WARN = 70
+// Lo plegado se recuerda entre sesiones ($.store dura más que el estado de la sesión).
+type FoldKey = 'plegarPresupuesto' | 'plegarAgentes' | 'plegarTareas' | 'plegarCambios'
 
 // Sin señales en este tiempo, un robot que dice trabajar pasa a «¿Colgado?». Un comando
 // (compilar, una consulta larga) no da señales mientras corre: se le da más margen.
@@ -277,6 +295,28 @@ function progressBar(frac: number, complete: boolean): string {
     (f > 0 ? `<rect x="0" y="1" width="${Math.max(8, f)}" height="8" rx="4" fill="url(#pb)"/>` : '') +
     `</svg>`
   )
+}
+
+// Barra fina de presupuesto (estática: sin SMIL, para que el redibujo no la haga latir).
+function thinBar(pct: number, color: string, w = 84): string {
+  const f = Math.round(w * Math.max(0, Math.min(1, pct / 100)))
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="6" viewBox="0 0 ${w} 6">` +
+    `<rect x="0" y="0" width="${w}" height="6" rx="3" fill="#888780" fill-opacity="0.22"/>` +
+    (f > 0 ? `<rect x="0" y="0" width="${Math.max(6, f)}" height="6" rx="3" fill="${color}"/>` : '') +
+    `</svg>`
+  )
+}
+
+// Color de una barra de presupuesto: el suyo, ámbar desde el 70 % y rojo desde el 90 %.
+function budgetColor(pct: number, own: string): string {
+  return pct >= 90 ? HOT[1] : pct >= CTX_WARN ? WARN[1] : own
+}
+
+// Minutos y segundos desde el arranque del agente, para su historial.
+function offset(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
 function bar10(pct: number): string {
@@ -650,6 +690,86 @@ async function finishFromNotice($: EngineInterface, text: string) {
   await tellEnds($).catch(() => {})
 }
 
+// Lo cambiado respecto a HEAD: «git diff --numstat» da las líneas exactas, no una cuenta de ediciones.
+// Fuera de un repositorio (o sin git) la sección no se dibuja.
+async function readChanges($: EngineInterface): Promise<Changes | null> {
+  const cwd = await $.session.cwd()
+  const diff = await $.process.run(['git', '-C', cwd, 'diff', '--numstat', 'HEAD'], { timeoutMs: 8000 })
+  if (diff.exitCode !== 0) return null
+  const files: Change[] = []
+  for (const line of diff.stdout.split('\n')) {
+    const [a, d, ...rest] = line.split('\t')
+    const path = rest.join('\t')
+    if (!path) continue
+    files.push({ path, add: Number(a) || 0, del: Number(d) || 0 })
+  }
+  files.sort((x, y) => y.add + y.del - (x.add + x.del))
+  const extra = await $.process.run(['git', '-C', cwd, 'ls-files', '--others', '--exclude-standard'], { timeoutMs: 8000 })
+  const untracked = extra.exitCode === 0 ? extra.stdout.split('\n').filter(Boolean).length : 0
+  return {
+    files,
+    add: files.reduce((n, f) => n + f.add, 0),
+    del: files.reduce((n, f) => n + f.del, 0),
+    untracked,
+  }
+}
+
+let changesTimer: Timer | undefined
+// El turno del hilo principal que está corriendo, para poder detenerlo desde el panel.
+let currentTurn: string | undefined
+// Tras una edición se relee git una sola vez cada pocos segundos, aunque lleguen muchas seguidas.
+function refreshChanges($: EngineInterface, wait = 1500) {
+  if (changesTimer) return
+  changesTimer = $.clock.after(wait, () => {
+    changesTimer = undefined
+    void readChanges($)
+      .then(c => update($, changes, () => c))
+      .catch(() => {})
+  })
+}
+
+const EDITS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+
+// Cada atom se nombra a mano: el escáner de estado necesita ver la clave literal en cada escritura.
+async function loadFolds($: EngineInterface) {
+  const get = async (key: FoldKey) => {
+    const v = await $.store.get(key)
+    return typeof v === 'boolean' ? v : undefined
+  }
+  const b = await get('plegarPresupuesto')
+  if (b !== undefined) await update($, foldBudget, () => b)
+  const a = await get('plegarAgentes')
+  if (a !== undefined) await update($, foldAgents, () => a)
+  const t = await get('plegarTareas')
+  if (t !== undefined) await update($, foldTasks, () => t)
+  const c = await get('plegarCambios')
+  if (c !== undefined) await update($, foldChanges, () => c)
+}
+
+function toggleFold($: EngineInterface, key: FoldKey) {
+  const save = (v: boolean) => $.store.set(key, v)
+  const run = async () => {
+    if (key === 'plegarPresupuesto') {
+      await update($, foldBudget, v => !v)
+      await save(await read($, foldBudget))
+    } else if (key === 'plegarAgentes') {
+      await update($, foldAgents, v => !v)
+      await save(await read($, foldAgents))
+    } else if (key === 'plegarTareas') {
+      await update($, foldTasks, v => !v)
+      await save(await read($, foldTasks))
+    } else {
+      await update($, foldChanges, v => !v)
+      await save(await read($, foldChanges))
+    }
+  }
+  void run().catch(() => {})
+}
+
+async function readContext($: EngineInterface, c: Ctx) {
+  await update($, context, () => ({ tokens: c.tokens, window: c.window, percent: c.percent }))
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     ticker = undefined
@@ -662,7 +782,17 @@ export const register: Register = on => {
     startBeat($)
     await quietEnded($).catch(() => {})
     // La cuota se lee al arrancar; después llega sola con cada medición.
-    await $.session.usage().then(u => readLimits($, u.rateLimits)).catch(() => {})
+    await $.session.usage()
+      .then(async u => {
+        await readLimits($, u.rateLimits)
+        await readContext($, u.context)
+      })
+      .catch(() => {})
+    await loadFolds($).catch(() => {})
+    await $.session.model().then(m => update($, mainModel, () => m)).catch(() => {})
+    changesTimer = undefined
+    currentTurn = undefined
+    refreshChanges($, 0)
     await $.command.register({
       name: 'bots',
       description: 'Abre el panel de agentes y tareas',
@@ -686,6 +816,7 @@ export const register: Register = on => {
   on('command.run', { command: 'bots' }, async $ => {
     await $.ui.open({ id: PANE, title: TITLE })
     await sync($)
+    refreshChanges($, 0)
 
     return { text: 'Panel de agentes y tareas abierto.' }
   })
@@ -693,6 +824,7 @@ export const register: Register = on => {
   on('command.run', { command: 'tareas' }, async $ => {
     await $.ui.open({ id: PANE, title: TITLE })
     await sync($)
+    refreshChanges($, 0)
 
     return { text: 'Panel de agentes y tareas abierto.' }
   })
@@ -760,13 +892,38 @@ export const register: Register = on => {
       void update($, bots, list =>
         list.map(b =>
           b.id === agentId
-            ? { ...b, action: text, calls: b.calls + 1, lastSeen: seen, status: isEnded(b.status) ? b.status : 'running' }
+            ? {
+                ...b,
+                action: text,
+                calls: b.calls + 1,
+                lastSeen: seen,
+                status: isEnded(b.status) ? b.status : 'running',
+                log: [...(b.log ?? []), { at: seen, text }].slice(-LOG_KEEP),
+              }
             : b,
         ),
       ).catch(() => {})
     }
 
+    // Lo último que hizo el hilo principal, para la línea de estado de arriba.
+    if (!agentId && !step(e.tool, input, undefined, 0) && e.tool !== 'Agent') {
+      void update($, mainAction, () => action(e.tool, input)).catch(() => {})
+    }
+
     const ran = await next(e)
+
+    if (EDITS.has(e.tool)) refreshChanges($)
+
+    // El texto final de un agente de primer plano llega al cerrarse su llamada: se guarda para copiarlo.
+    if (e.tool === 'Agent' && !agentId) {
+      const text = (ran as { text?: unknown }).text
+      if (typeof text === 'string' && text.trim()) {
+        const prefix = `${e.tool_use_id}:`
+        void update($, bots, list =>
+          list.map(b => (b.key.startsWith(prefix) ? { ...b, result: text.slice(0, 20000) } : b)),
+        ).catch(() => {})
+      }
+    }
 
     // Un comando que quedó en segundo plano (pedido así o con Ctrl+B) recibe su propio robot.
     if (e.tool === 'Bash' || e.tool === 'PowerShell') {
@@ -808,6 +965,9 @@ export const register: Register = on => {
   // Cada petición del hilo principal (los subagentes tienen su propio prefijo): qué hizo la caché con ella.
   on('turn.step', async function* ($, e, next) {
     if (e.agentId) return yield* next(e)
+    currentTurn = e.turnId
+    void update($, busy, () => true).catch(() => {})
+    if (e.model) void update($, mainModel, () => e.model).catch(() => {})
     const inicio = await $.clock.now()
     const r = yield* next(e)
     try {
@@ -837,6 +997,7 @@ export const register: Register = on => {
 
   on('session.measure', async ($, e, next) => {
     if (e.changed.includes('rateLimits')) await readLimits($, e.rateLimits).catch(() => {})
+    if (e.changed.includes('context')) await readContext($, e.context).catch(() => {})
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -852,6 +1013,9 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('classic.Stop', async ($, e, next) => {
+    currentTurn = undefined
+    await update($, busy, () => false).catch(() => {})
+    await update($, mainAction, () => '').catch(() => {})
     await settleShells($, e.background_tasks).catch(() => {})
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -863,6 +1027,8 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
+    const { Box, Text, Button } = els
+    const Svg = 'Svg' in els ? els.Svg : undefined
     // Línea divisoria entre secciones: caracteres de caja tenues al ancho del panel, que se ve
     // igual en la app y en la terminal (no hay borde de un solo lado en los elementos).
     const rule = (key: string) => (
@@ -870,17 +1036,17 @@ export const register: Register = on => {
         {'─'.repeat(Math.max(8, e.props.bodyColumns || 40))}
       </Text>
     )
-    const { Box, Text, Button } = els
-    const Svg = 'Svg' in els ? els.Svg : undefined
     const list = await read($, bots)
     const t = (await read($, now)) || (await $.clock.now())
+    const clock = await $.clock.now()
 
     const order: Record<BotMood, number> = { run: 0, sleep: 1, fail: 2, done: 3 }
-    const shown = [...list].sort(
+    const sorted = [...list].sort(
       (a, b) => order[mood(a.status)] - order[mood(b.status)] || b.startedAt - a.startedAt,
     )
     const count = (m: BotMood) => list.filter(b => mood(b.status) === m).length
-    const ended = list.some(b => isEnded(b.status))
+    const live = sorted.filter(b => !isEnded(b.status))
+    const finished = sorted.filter(b => isEnded(b.status))
 
     const todo = await read($, tasks)
     const hiding = await read($, hideDone)
@@ -892,36 +1058,32 @@ export const register: Register = on => {
     const pct = todo.length ? Math.round((done / todo.length) * 100) : 0
 
     const quota = await read($, limits)
-    const clock = await $.clock.now()
-
-    // Caché de prompts: acierto de la última petición y cuánto le queda de vida (por minutos, para no distraer).
+    const ctx = await read($, context)
+    const ctxPct = ctx?.percent
     const recent = await read($, samples)
     const last = recent[recent.length - 1]
     const ttl = await read($, cacheTtl)
-    const left_ms = last ? restanteMs(last, ttl, clock) : 0
-    const hit = last ? Math.round(aciertos(last) * 100) : undefined
-    const cacheRamp: [string, string] = left_ms > 0 ? ['#5DCAA5', '#1D9E75'] : ['#B4B2A9', '#888780']
-    const cacheLife = !last
-      ? 'sin peticiones'
-      : last.leido + last.escrito === 0
-        ? 'sin caché'
-        : left_ms > 0
-          ? `⏱ ${left_ms < 60000 ? '<1 min' : `${Math.ceil(left_ms / 60000)} min`}`
-          : 'vencida'
-    // Corto a propósito: un texto más ancho que los de 5 h y semana ensancha la columna y agranda el anillo.
-    const cacheDetail = last ? `${tokens(last.leido)} leído` : ''
+    const leftMs = last ? restanteMs(last, ttl, clock) : 0
 
-    // Un robot que dice trabajar pero lleva demasiado sin dar señales.
     const silentFor = (b: Bot) => t - (b.lastSeen ?? b.startedAt)
     const isStalled = (b: Bot) =>
       mood(b.status) === 'run' && silentFor(b) > (b.kind === 'shell' ? STALL_SHELL_MS : STALL_AGENT_MS)
     const stalled = list.filter(isStalled).length
     const twice = await read($, duplicated)
+    const foldB = await read($, foldBudget)
     const foldA = await read($, foldAgents)
     const foldT = await read($, foldTasks)
+    const foldC = await read($, foldChanges)
+    const showE = await read($, showEnded)
     const showAll = await read($, allPending)
+    const openKey = await read($, opened)
+    const asking = await read($, confirming)
+    const isBusy = await read($, busy)
+    const model = await read($, mainModel)
+    const doingNow = await read($, mainAction)
+    const ch = await read($, changes)
+    const dv = await read($, diffView)
 
-    // Qué tareas se dibujan: las hechas (salvo ocultas), la en curso y las próximas pendientes.
     const pendingCount = todo.filter(x => x.status === 'pending').length
     let pendingShown = 0
     const visibleTasks = todo.filter(x => {
@@ -932,6 +1094,179 @@ export const register: Register = on => {
     })
     const hiddenPending = showAll ? 0 : Math.max(0, pendingCount - PENDING_PREVIEW)
 
+    const ask = (key: string | null) => {
+      void update($, confirming, () => key).catch(() => {})
+    }
+    const no = <Button key="confirm-no" label="No" onPress={() => ask(null)} />
+    const chip = (text: string, ramp: Ramp) => (
+      <Text backgroundColor={ramp[0]} color={ramp[2]}>{` ${text} `}</Text>
+    )
+
+    // Estado de arriba: lo que está haciendo ahora y, si hace falta, cómo pararlo.
+    const cur = doing[0]
+    const stepNo = cur ? todo.indexOf(cur) + 1 : 0
+    const headline = cur
+      ? cur.content
+      : isBusy ? 'Trabajando'
+      : live.length ? `${live.length} en segundo plano`
+      : 'En espera'
+    const detail = [
+      stepNo ? `Paso ${stepNo} de ${todo.length}` : '',
+      cur?.startedAt !== undefined ? elapsed(t - cur.startedAt) : '',
+      isBusy ? doingNow : '',
+    ].filter(Boolean).join(' · ')
+
+    // Presupuesto: 5 h, semana y contexto como barras finas en tres columnas.
+    const cols: { key: string; label: string; pct: number; color: string; sub: string; alt: string }[] = []
+    for (const { kind, label, ramp } of QUOTA) {
+      const l = quota.find(x => x.kind === kind)
+      if (!l) continue
+      const reset = resetIn(l.resetsAt, clock)
+      cols.push({ key: kind, label, pct: l.percentUsed, color: ramp[1], sub: reset ? `↻ ${reset}` : '', alt: `Cuota ${label}` })
+    }
+    if (ctx && ctxPct !== undefined) {
+      cols.push({
+        key: 'context',
+        label: 'Contexto',
+        pct: ctxPct,
+        color: '#378ADD',
+        sub: ctx.tokens !== undefined ? `${tokens(ctx.tokens)} / ${tokens(ctx.window)}` : '',
+        alt: 'Contexto',
+      })
+    }
+    const ctxHigh = ctxPct !== undefined && ctxPct >= CTX_WARN
+    const cacheLine = !last
+      ? ''
+      : last.leido + last.escrito === 0
+        ? 'Caché sin usar'
+        : leftMs > 0
+          ? `Caché caliente · vence en ${leftMs < 60000 ? '<1 min' : `${Math.ceil(leftMs / 60000)} min`} · ${tokens(last.leido)} leído`
+          : `Caché vencida · ${tokens(last.leido)} por reescribir`
+
+    const head = (fold: FoldKey, key: string, folded: boolean, title: string, extra?: unknown, right?: unknown) => (
+      <Box key={`h:${key}`} flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+        <Box flexDirection="row" alignItems="center" gap={1} flexShrink={1}>
+          <Button key={key} plain label={`${folded ? '▸' : '▾'} ${title}`} onPress={() => toggleFold($, fold)} />
+          {extra as never}
+        </Box>
+        {right as never}
+      </Box>
+    )
+
+    const row = (b: Bot) => {
+      const hung = isStalled(b)
+      const m = hung ? 'sleep' : mood(b.status)
+      const [label, color] = hung ? ['¿Colgado?', WARN[1]] : LABEL[m]
+      const shell = b.kind === 'shell'
+      const c = modelChip(b)
+      const isOpen = openKey === b.key
+      const target = shell ? b.taskId : b.background ? (b.id ?? b.description) : undefined
+      const canStop = !isEnded(b.status) && !!target
+      return (
+        <Box key={b.key} flexDirection="column">
+          <Box flexDirection="row" gap={1} alignItems="center">
+            {Svg ? (
+              <Svg source={robot(m, b.model, b.kind)} alt={`Robot ${label.toLowerCase()}`} width={36} height={36} isInteractive />
+            ) : (
+              <Text>{shell && m === 'run' ? '⚙️' : GLYPH[m]}</Text>
+            )}
+            <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+              <Box flexDirection="row" justifyContent="space-between" gap={1}>
+                <Text bold wrap="truncate-end">{b.description}</Text>
+                <Box flexDirection="row" gap={1}>
+                  <Button
+                    key={`open:${b.key}`}
+                    plain
+                    label={isOpen ? '▾' : '▸'}
+                    onPress={() => {
+                      void update($, opened, k => (k === b.key ? null : b.key)).catch(() => {})
+                    }}
+                  />
+                  <Button
+                    key={`x:${b.key}`}
+                    plain
+                    label="✕"
+                    onPress={() => {
+                      void update($, bots, l => l.filter(one => one.key !== b.key)).catch(() => {})
+                    }}
+                  />
+                </Box>
+              </Box>
+              <Text wrap="truncate-end">
+                <Text color={color}>{label}</Text>{' '}
+                {chip(c.text, c.ramp)}
+                <Text dimColor>
+                  {' · '}{elapsed((b.endedAt ?? t) - b.startedAt)}{shell ? '' : ` · ${b.calls} 🔧`}
+                </Text>
+              </Text>
+              <Text wrap="truncate-end" dimColor={m !== 'run'}>
+                {hung
+                  ? `Sin señales hace ${elapsed(silentFor(b))} · ✕ para quitarlo`
+                  : m === 'done' ? '✓ Terminado' : m === 'sleep' && b.calls === 0 ? 'zzz… esperando' : b.action}
+              </Text>
+            </Box>
+          </Box>
+          {isOpen && (b.log ?? []).map((x, i) => (
+            <Text key={`log:${b.key}:${i}`} dimColor wrap="truncate-end">
+              {`    ${offset(x.at - b.startedAt)}  ${x.text}`}
+            </Text>
+          ))}
+          {isOpen && !(b.log ?? []).length && <Text dimColor>{'    Sin acciones registradas todavía'}</Text>}
+          {isOpen && asking === `stop:${b.key}` && (
+            <Box flexDirection="row" gap={1} justifyContent="flex-end" alignItems="center">
+              <Text color={HOT[1]}>¿Detener este {shell ? 'comando' : 'agente'}?</Text>
+              <Button
+                key={`stop-yes:${b.key}`}
+                variant="primary"
+                label="Sí, detener"
+                onPress={() => {
+                  ask(null)
+                  void $.tool.call({ tool: 'TaskStop', task_id: target })
+                    .then(async r => {
+                      if (r.deny) return toast($, `No se pudo detener: ${clip(r.deny, 60)}`)
+                      const at = await $.clock.now()
+                      await update($, bots, l => l.map(one => (one.key === b.key ? { ...one, status: 'killed', endedAt: at, told: true } : one)))
+                      toast($, `⏹ Detenido: ${clip(b.description, 50)}`)
+                    })
+                    .catch(() => toast($, 'No se pudo detener'))
+                }}
+              />
+              {no}
+            </Box>
+          )}
+          {isOpen && asking !== `stop:${b.key}` && (
+            <Box flexDirection="row" gap={1} justifyContent="flex-end">
+              {canStop && <Button key={`stop:${b.key}`} label="Detener" onPress={() => ask(`stop:${b.key}`)} />}
+              <Button
+                key={`ask:${b.key}`}
+                label="Preguntar"
+                onPress={() => {
+                  const q = `¿En qué va «${b.description}» y qué le falta?`
+                  void $.prompt.read()
+                    .then(box => $.prompt.fill(box.text.trim() ? { text: `\n${q}`, mode: 'append' } : { text: q }))
+                    .then(r => {
+                      if (!r.isFilled) toast($, 'No se pudo escribir en la caja del prompt')
+                    })
+                    .catch(() => {})
+                }}
+              />
+              {b.result && (
+                <Button
+                  key={`copy:${b.key}`}
+                  label="Copiar resultado"
+                  onPress={press => {
+                    void $.ui.copy({ text: b.result ?? '', surface: press.surface })
+                      .then(r => toast($, r.isCopied ? 'Resultado copiado' : 'No se pudo copiar'))
+                      .catch(() => {})
+                  }}
+                />
+              )}
+            </Box>
+          )}
+        </Box>
+      )
+    }
+
     return (
       <Box flexDirection="column" gap={1}>
         {twice && (
@@ -939,57 +1274,112 @@ export const register: Register = on => {
             ⚠ agent-bots está cargado dos veces (p. ej. una copia en dev-mods y la instalada): los conteos salen dobles. Quita una y recarga.
           </Text>
         )}
-        {(quota.length > 0 || last) && (
-          <Box flexDirection="row" gap={2} justifyContent="space-around" alignItems="flex-start">
-            {QUOTA.map(({ kind, label, ramp }) => {
-              const l = quota.find(x => x.kind === kind)
-              if (!l) return null
-              const reset = resetIn(l.resetsAt, clock)
-              const hot = l.percentUsed >= 90 ? HOT[1] : l.percentUsed >= 70 ? WARN[1] : undefined
+
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+          <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+            <Text bold wrap="truncate-end">
+              <Text color={isBusy || live.length ? '#378ADD' : '#888780'}>● </Text>
+              {headline}
+            </Text>
+            <Text wrap="truncate-end">
+              {model ? chip(modelName(model), RAMP[family(model)]) : null}
+              <Text dimColor>{detail ? ` ${detail}` : ''}</Text>
+            </Text>
+          </Box>
+          {isBusy && currentTurn && asking !== 'turn' && (
+            <Button key="turn-stop" label="Detener" onPress={() => ask('turn')} />
+          )}
+        </Box>
+        {asking === 'turn' && (
+          <Box flexDirection="row" gap={1} justifyContent="flex-end" alignItems="center">
+            <Text color={HOT[1]}>¿Detener el turno en curso?</Text>
+            <Button
+              key="turn-stop-yes"
+              variant="primary"
+              label="Sí, detener"
+              onPress={() => {
+                ask(null)
+                const id = currentTurn
+                if (id) void $.turn.abort({ turnId: id }).catch(() => toast($, 'No se pudo detener el turno'))
+              }}
+            />
+            {no}
+          </Box>
+        )}
+
+        {(cols.length > 0 || last) && rule('rule:budget')}
+        {(cols.length > 0 || last) && head('plegarPresupuesto', 'fold-budget', foldB, 'Presupuesto')}
+        {!foldB && cols.length > 0 && (
+          <Box flexDirection="row" gap={2} justifyContent="space-between">
+            {cols.map(c => {
+              const color = budgetColor(c.pct, c.color)
               return (
-                <Box key={`q:${kind}`} flexDirection={Svg ? 'column' : 'row'} alignItems="center" gap={Svg ? 0 : 1}>
+                <Box key={`q:${c.key}`} flexDirection="column" flexShrink={1}>
+                  <Text dimColor>{c.label}</Text>
+                  <Text bold color={c.pct >= CTX_WARN ? color : undefined}>{`${Math.round(c.pct)} %`}</Text>
                   {Svg ? (
-                    <Svg source={gauge(l.percentUsed, ramp, kind)} alt={`Cuota ${label}: ${Math.round(l.percentUsed)} %`} width={72} height={72} />
+                    <Svg source={thinBar(c.pct, color)} alt={`${c.alt}: ${Math.round(c.pct)} %`} width={84} height={6} />
                   ) : (
-                    <Text color={hot ?? ramp[1]}>{`${label.padEnd(6)} ${bar10(l.percentUsed)} ${Math.round(l.percentUsed)}%`}</Text>
+                    <Text color={color}>{bar10(c.pct)}</Text>
                   )}
-                  {Svg && <Text bold>{label}</Text>}
-                  {reset && <Text dimColor>{Svg ? `↻ ${reset}` : `· ↻ ${reset}`}</Text>}
+                  {c.sub && <Text dimColor wrap="truncate-end">{c.sub}</Text>}
                 </Box>
               )
             })}
-            {last && (
-              <Box key="q:cache" flexDirection={Svg ? 'column' : 'row'} alignItems="center" gap={Svg ? 0 : 1}>
-                {Svg ? (
-                  <Svg source={gauge(hit ?? 0, cacheRamp, 'cache', false)} alt={`Caché: ${hit ?? 0} % de aciertos`} width={72} height={72} />
-                ) : (
-                  <Text color={cacheRamp[1]}>{`${'Caché'.padEnd(6)} ${bar10(hit ?? 0)} ${hit ?? 0}%`}</Text>
-                )}
-                {Svg && <Text bold>Caché</Text>}
-                <Text dimColor>{Svg ? cacheLife : `· ${cacheLife}`}</Text>
-                {Svg && cacheDetail && <Text dimColor>{cacheDetail}</Text>}
-              </Box>
-            )}
           </Box>
         )}
-        {(quota.length > 0 || last) && rule('rule:agents')}
-        <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
-          <Box flexDirection="row" alignItems="center" gap={1} flexShrink={1}>
+        {!foldB && cacheLine && (
+          <Text color={leftMs > 0 ? '#5DCAA5' : '#888780'} wrap="truncate-end">{cacheLine}</Text>
+        )}
+        {!foldB && ctxHigh && (
+          <Text color={WARN[1]} wrap="wrap">
+            {`Contexto al ${Math.round(ctxPct ?? 0)} %: compactar libera espacio y conserva el hilo.`}
+          </Text>
+        )}
+        {!foldB && ctxPct !== undefined && asking !== 'clear' && (
+          <Box flexDirection="row" gap={1} justifyContent="flex-end">
             <Button
-              key="fold-agents"
-              plain
-              label={`${foldA ? '▸' : '▾'} Agentes`}
+              key="ctx-compact"
+              variant={ctxHigh ? 'primary' : undefined}
+              label="Compactar"
               onPress={() => {
-                void update($, foldAgents, v => !v).catch(() => {})
+                void $.session.compact()
+                  .then(() => toast($, 'Conversación compactada'))
+                  .catch(() => toast($, 'No se pudo compactar ahora'))
               }}
             />
-            <Text dimColor wrap="truncate-end">
-              · {count('run')} trabajando · {count('sleep')} esperando · {count('done')} listos
-              {count('fail') ? ` · ${count('fail')} fallidos` : ''}
-              {stalled ? ` · ${stalled} ¿colgados?` : ''}
-            </Text>
+            <Button key="ctx-clear" label="Limpiar" onPress={() => ask('clear')} />
           </Box>
-          {list.length > 0 && (
+        )}
+        {!foldB && asking === 'clear' && (
+          <Box flexDirection="row" gap={1} justifyContent="flex-end" alignItems="center">
+            <Text color={HOT[1]}>¿Borrar la conversación?</Text>
+            <Button
+              key="ctx-clear-yes"
+              variant="primary"
+              label="Sí, limpiar"
+              onPress={() => {
+                ask(null)
+                void $.command.run({ command: 'clear' })
+                  .catch(() => toast($, 'No se pudo limpiar: escribe /clear'))
+              }}
+            />
+            {no}
+          </Box>
+        )}
+
+        {rule('rule:agents')}
+        {head(
+          'plegarAgentes',
+          'fold-agents',
+          foldA,
+          'Agentes',
+          <Text dimColor wrap="truncate-end">
+            · {count('run')} trabajando · {count('sleep')} esperando · {count('done')} listos
+            {count('fail') ? ` · ${count('fail')} fallidos` : ''}
+            {stalled ? ` · ${stalled} ¿colgados?` : ''}
+          </Text>,
+          list.length > 0 ? (
             <Button
               key="clear-all"
               label="Limpiar agentes"
@@ -997,86 +1387,43 @@ export const register: Register = on => {
                 void update($, bots, () => []).catch(() => {})
               }}
             />
-          )}
-        </Box>
-        {!foldA && list.length > 0 && (
-          <Text dimColor wrap="truncate-end">
-            <Text color={RAMP.opus[1]}>●</Text> Opus{'  '}<Text color={RAMP.sonnet[1]}>●</Text> Sonnet{'  '}
-            <Text color={RAMP.haiku[1]}>●</Text> Haiku{'  '}<Text color={SHELL[1]}>⚙</Text> Comando{'  '}
-            <Text color={RAMP.other[1]}>●</Text> sin dato
-          </Text>
+          ) : undefined,
         )}
         {!foldA && list.length === 0 && (
           <Text dimColor>Ningún agente ni comando todavía. Aparecerán aquí en cuanto se lance uno.</Text>
         )}
-        {!foldA &&
-          shown.map(b => {
-            const hung = isStalled(b)
-            // Colgado: se dibuja dormido y en ámbar, con cuánto lleva callado.
-            const m = hung ? 'sleep' : mood(b.status)
-            const [label, color] = hung ? ['¿Colgado?', WARN[1]] : LABEL[m]
-            const shell = b.kind === 'shell'
-            const chip = modelChip(b)
-            return (
-              <Box key={b.key} flexDirection="row" gap={1} alignItems="center">
-                {Svg ? (
-                  <Svg source={robot(m, b.model, b.kind)} alt={`Robot ${label.toLowerCase()}`} width={52} height={52} isInteractive />
-                ) : (
-                  <Text>{shell && m === 'run' ? '⚙️' : GLYPH[m]}</Text>
-                )}
-                <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-                  <Box flexDirection="row" justifyContent="space-between" gap={1}>
-                    <Text bold wrap="truncate-end">{b.description}</Text>
-                    <Button
-                      key={`x:${b.key}`}
-                      plain
-                      label="✕"
-                      onPress={() => {
-                        void update($, bots, l => l.filter(one => one.key !== b.key)).catch(() => {})
-                      }}
-                    />
-                  </Box>
-                  <Text wrap="truncate-end">
-                    <Text color={color}>{label}</Text>{' '}
-                    <Text backgroundColor={chip.ramp[0]} color={chip.ramp[2]}>{` ${chip.text} `}</Text>
-                    <Text dimColor>
-                      {' · '}{elapsed((b.endedAt ?? t) - b.startedAt)}{shell ? '' : ` · ${b.calls} 🔧`}
-                    </Text>
-                  </Text>
-                  <Text wrap="truncate-end" dimColor={m !== 'run'}>
-                    {hung
-                      ? `Sin señales hace ${elapsed(silentFor(b))} · ✕ para quitarlo`
-                      : m === 'done' ? '✓ Terminado' : m === 'sleep' && b.calls === 0 ? 'zzz… esperando' : b.action}
-                  </Text>
-                </Box>
-              </Box>
-            )
-          })}
-        {!foldA && ended && (
-          <Box flexDirection="row" justifyContent="flex-end">
+        {!foldA && live.map(row)}
+        {!foldA && finished.length > 0 && (
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center">
             <Button
-              key="clear"
-              label="Quitar terminados"
+              key="agents-ended"
+              plain
+              label={showE ? `▾ Ocultar ${finished.length} terminados` : `▸ Ver ${finished.length} terminados`}
               onPress={() => {
-                void update($, bots, l => l.filter(b => !isEnded(b.status))).catch(() => {})
+                void update($, showEnded, v => !v).catch(() => {})
               }}
             />
+            {showE && (
+              <Button
+                key="clear"
+                label="Quitar terminados"
+                onPress={() => {
+                  void update($, bots, l => l.filter(b => !isEnded(b.status))).catch(() => {})
+                }}
+              />
+            )}
           </Box>
         )}
+        {!foldA && showE && finished.map(row)}
+
         {rule('rule:tasks')}
-        <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
-          <Box flexDirection="row" alignItems="center" gap={1} flexShrink={1}>
-            <Button
-              key="fold-tasks"
-              plain
-              label={`${foldT ? '▸' : '▾'} Tareas`}
-              onPress={() => {
-                void update($, foldTasks, v => !v).catch(() => {})
-              }}
-            />
-            {todo.length > 0 && <Text dimColor wrap="truncate-end">· {done}/{todo.length} hechas · {pct}%</Text>}
-          </Box>
-          {done > 0 && (
+        {head(
+          'plegarTareas',
+          'fold-tasks',
+          foldT,
+          'Plan',
+          todo.length > 0 ? <Text dimColor wrap="truncate-end">· {done}/{todo.length} hechas · {pct}%</Text> : undefined,
+          done > 0 ? (
             <Button
               key="tasks-toggle-done"
               label={hiding ? `👁 Mostrar hechas (${done})` : '🙈 Ocultar hechas'}
@@ -1084,29 +1431,24 @@ export const register: Register = on => {
                 void update($, hideDone, v => !v).catch(() => {})
               }}
             />
-          )}
-        </Box>
-        {!foldT && (
-          <Box flexDirection="row" gap={1} alignItems="center">
+          ) : undefined,
+        )}
+        {!foldT && todo.length === 0 && (
+          <Box flexDirection="column">
+            <Text bold>Sin tareas todavía</Text>
+            <Text dimColor>Aparecerán aquí cuando se arme un plan.</Text>
+          </Box>
+        )}
+        {!foldT && todo.length > 0 && (
+          <Box flexDirection="column">
             {Svg ? (
-              <Svg source={robot(tmood, 'sonnet')} alt={`Robot ${LABEL[tmood][0].toLowerCase()}`} width={48} height={48} isInteractive />
+              <Svg source={progressBar(done / todo.length, tmood === 'done')} alt={`${pct} % hecho`} width={220} height={10} />
             ) : (
-              <Text>{GLYPH[tmood]}</Text>
+              <Text color={tmood === 'done' ? '#639922' : '#378ADD'}>{bar(done, todo.length)}</Text>
             )}
-            <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-              {todo.length === 0 && <Text bold>Sin tareas todavía</Text>}
-              {todo.length > 0 &&
-                (Svg ? (
-                  <Svg source={progressBar(done / todo.length, tmood === 'done')} alt={`${pct} % hecho`} width={220} height={10} />
-                ) : (
-                  <Text color={tmood === 'done' ? '#639922' : '#378ADD'}>{bar(done, todo.length)}</Text>
-                ))}
-              <Text dimColor wrap="truncate-end">
-                {todo.length === 0
-                  ? 'Aparecerán aquí cuando se arme un plan.'
-                  : `${doing.length} en curso · ${left} pendientes${since === Infinity ? '' : ` · ⏱ ${elapsed(t - since)} desde el inicio`}`}
-              </Text>
-            </Box>
+            <Text dimColor wrap="truncate-end">
+              {`${doing.length} en curso · ${left} pendientes${since === Infinity ? '' : ` · ⏱ ${elapsed(t - since)} desde el inicio`}`}
+            </Text>
           </Box>
         )}
         {!foldT &&
@@ -1172,6 +1514,61 @@ export const register: Register = on => {
             />
           </Box>
         )}
+
+        {ch && (ch.files.length > 0 || ch.untracked > 0) && rule('rule:changes')}
+        {ch && (ch.files.length > 0 || ch.untracked > 0) &&
+          head(
+            'plegarCambios',
+            'fold-changes',
+            foldC,
+            'Cambios',
+            <Text dimColor wrap="truncate-end">
+              {`· ${ch.files.length} ${ch.files.length === 1 ? 'archivo' : 'archivos'}`}
+              {ch.untracked ? ` · ${ch.untracked} sin seguimiento` : ''}
+            </Text>,
+            <Text>
+              <Text color="#6FCF8F">{`+${ch.add}`}</Text> <Text color={HOT[0]}>{`−${ch.del}`}</Text>
+            </Text>,
+          )}
+        {ch && !foldC &&
+          ch.files.slice(0, 4).map(f => (
+            <Box key={`f:${f.path}`} flexDirection="column">
+              <Box flexDirection="row" justifyContent="space-between" gap={1}>
+                <Button
+                  key={`file:${f.path}`}
+                  plain
+                  label={`${dv?.path === f.path ? '▾' : '▸'} ${base(f.path)}`}
+                  onPress={() => {
+                    if (dv?.path === f.path) {
+                      void update($, diffView, () => null).catch(() => {})
+                      return
+                    }
+                    void $.session.cwd()
+                      .then(cwd => $.process.run(['git', '-C', cwd, 'diff', 'HEAD', '--', f.path], { timeoutMs: 8000 }))
+                      .then(r => {
+                        const lines = r.stdout
+                          .split('\n')
+                          .filter(l => (l.startsWith('+') || l.startsWith('-')) && !l.startsWith('+++') && !l.startsWith('---'))
+                          .slice(0, 12)
+                        return update($, diffView, () => ({ path: f.path, lines }))
+                      })
+                      .catch(() => {})
+                  }}
+                />
+                <Text>
+                  <Text color="#6FCF8F">{f.add ? `+${f.add}` : ''}</Text>
+                  <Text color={HOT[0]}>{f.del ? ` −${f.del}` : ''}</Text>
+                </Text>
+              </Box>
+              {dv?.path === f.path &&
+                dv.lines.map((l, i) => (
+                  <Text key={`d:${i}`} color={l.startsWith('+') ? '#6FCF8F' : HOT[0]} wrap="truncate-end">
+                    {`  ${l}`}
+                  </Text>
+                ))}
+            </Box>
+          ))}
+        {ch && !foldC && ch.files.length > 4 && <Text dimColor>{`y ${ch.files.length - 4} más`}</Text>}
       </Box>
     )
   })

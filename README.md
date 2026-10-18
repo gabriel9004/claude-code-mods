@@ -12,7 +12,7 @@ Dos mods para Claude Code que muestran en pantalla lo que normalmente no se ve: 
 
 | Mod | Qué hace | Dónde se ve |
 | --- | --- | --- |
-| [`agent-bots`](agent-bots) | Panel lateral «Agentes y tareas»: cada subagente (y cada comando en segundo plano) como un robot animado con la etiqueta de su modelo, la lista de tareas de la sesión en vivo (con las hechas ocultables) y tres anillos: cuota de 5 h, cuota semanal y caché de prompts. Avisa al terminar el plan o un agente en segundo plano, marca «¿Colgado?» al robot que lleva demasiado sin señales y advierte si el mod está cargado dos veces | App de escritorio (en terminal, versión de texto) |
+| [`agent-bots`](agent-bots) | Panel lateral «Agentes y tareas»: qué está haciendo ahora (paso, tiempo y acción), presupuesto en barras finas (5 h, semana y contexto) con el estado de la caché y botones para compactar o limpiar, agentes y comandos como robots con la etiqueta de su modelo y desplegables con su historial y acciones (detener, preguntar, copiar resultado), el plan de la sesión y los cambios en git con su diff. Las secciones se pliegan y lo plegado se recuerda entre sesiones | App de escritorio (en terminal, versión de texto) |
 | [`medidor`](medidor) | Banda sobre el prompt: modelo y esfuerzo, contexto, límites de 5 h y semana con su reinicio, costo, duración y estado de la caché con cuenta regresiva | Terminal |
 
 Los dos se complementan: `medidor` solo dibuja en la terminal y `agent-bots` hace lo mismo en la app de escritorio. Puedes instalar solo uno.
@@ -30,9 +30,9 @@ Luego `/tareas` o `/bots` abre el panel y `/medidor [completo|compacto|oculto]` 
 
 ## Qué lee cada mod
 
-Un mod se ejecuta con acceso a la sesión, así que conviene saber qué toca. Ninguno envía datos a ningún sitio ni guarda nada en disco.
+Un mod se ejecuta con acceso a la sesión, así que conviene saber qué toca. Ninguno envía datos a ningún sitio. Lo único que se guarda entre sesiones es qué secciones del panel de agent-bots tienes plegadas.
 
-- **agent-bots:** los subagentes y herramientas que usa la sesión, la lista de tareas, los porcentajes de cuota (`session.usage`), el uso de tokens de cada petición para la caché y tres variables de entorno de solo lectura (`FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, `ENABLE_PROMPT_CACHING_1H`). Registra una herramienta propia, `tareas`, y solo añade una línea al prompt de sistema si la sesión no trae ninguna herramienta de tareas.
+- **agent-bots:** los subagentes y herramientas que usa la sesión, la lista de tareas, los porcentajes de cuota (`session.usage`), el uso de tokens de cada petición para la caché y tres variables de entorno de solo lectura (`FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, `ENABLE_PROMPT_CACHING_1H`). Registra una herramienta propia, `tareas`, y solo añade una línea al prompt de sistema si la sesión no trae ninguna herramienta de tareas. Para la sección de cambios ejecuta `git diff` y `git ls-files` en la carpeta de la sesión, solo lectura. Solo actúa cuando pulsas un botón: «Detener» llama a `TaskStop` y «Detener» del turno lo interrumpe, ambos con confirmación; «Preguntar» escribe en tu caja del prompt sin enviar; «Compactar» y «Limpiar» (con confirmación) equivalen a `/compact` y `/clear`.
 - **medidor:** modelo, esfuerzo, uso de contexto y de cuota, costo, tokens de cada petición y las mismas tres variables de entorno.
 
 ## Desarrollo

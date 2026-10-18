@@ -52,6 +52,9 @@ test('un subagente aparece como robot trabajando con su última herramienta', as
   status = 'completed'
   await clock.advance(1500)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // Lo terminado se pliega: se ve al desplegar «Ver N terminados».
+  expect(await ui.find({ text: /Ver 1 terminados/ })).toBeDefined()
+  await ui.press({ key: 'agents-ended' })
   expect(await ui.find({ text: /Listo/ })).toBeDefined()
   await ui.press({ key: 'clear' })
   expect(await ui.find({ text: /Ningún agente/ })).toBeDefined()
@@ -99,6 +102,7 @@ test('un comando en segundo plano tiene su robot y termina cuando deja de estar 
   const stop = { stop_hook_active: false, background_tasks: [] }
   await $.classic.Stop(stop as unknown as Parameters<typeof $.classic.Stop>[0])
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'agents-ended' })
   expect(await ui.find({ text: /Listo/ })).toBeDefined()
   await ui.unmount()
 })
@@ -126,6 +130,7 @@ test('el aviso de tarea terminada cierra el robot del comando y los botones limp
   expect(await ui.find({ text: /1 trabajando · 0 esperando · 1 listos/ })).toBeDefined()
   await ui.press({ key: 'x:shell:b2' })
   expect(await ui.find({ text: /Corre el script/ })).toBeUndefined()
+  await ui.press({ key: 'agents-ended' })
   expect(await ui.find({ text: /Compila App/ })).toBeDefined()
   await ui.press({ key: 'clear-all' })
   expect(await ui.find({ text: /Ningún agente/ })).toBeDefined()
@@ -353,9 +358,7 @@ test('el panel de escritorio muestra la caché de la última petición', async (
   for await (const _chunk of stream) void _chunk
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ text: /^Caché$/ })).toBeDefined()
-  expect(await ui.find({ text: /⏱ 60 min/ })).toBeDefined()
-  expect(await ui.find({ text: /90k leído/ })).toBeDefined()
+  expect(await ui.find({ text: /Caché caliente · vence en 60 min · 90k leído/ })).toBeDefined()
   await ui.unmount()
 
 })
@@ -496,11 +499,13 @@ test('los encabezados pliegan y despliegan cada sección', async ($, on) => {
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ text: /Tarea visible/ })).toBeDefined()
+  // La tarea en curso también encabeza el panel: lo que se pliega es la lista.
+  expect(await ui.find({ text: /Limpiar tareas/ })).toBeDefined()
   await ui.press({ key: 'fold-tasks' })
-  expect(await ui.find({ text: /Tarea visible/ })).toBeUndefined()
+  expect(await ui.find({ text: /Limpiar tareas/ })).toBeUndefined()
   expect(await ui.find({ text: /0\/1 hechas/ })).toBeDefined()
   await ui.press({ key: 'fold-tasks' })
-  expect(await ui.find({ text: /Tarea visible/ })).toBeDefined()
+  expect(await ui.find({ text: /Limpiar tareas/ })).toBeDefined()
 
   expect(await ui.find({ text: /Ningún agente/ })).toBeDefined()
   await ui.press({ key: 'fold-agents' })
@@ -508,7 +513,7 @@ test('los encabezados pliegan y despliegan cada sección', async ($, on) => {
   await ui.unmount()
 })
 
-test('cada agente lleva la etiqueta de su modelo y la leyenda queda visible', async ($, on) => {
+test('cada agente lleva la etiqueta de su modelo escrita', async ($, on) => {
   mock.clock(on)
   on('agent.spawn', async () => ({ model: 'claude-opus-5-5', agentId: 'o1' }))
   on('agent.list', async () => ({ value: [{ id: 'o1', description: 'Revisar dividendos', type: 'general-purpose', status: 'running' }] }))
@@ -518,7 +523,115 @@ test('cada agente lleva la etiqueta de su modelo y la leyenda queda visible', as
   })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ text: /^ Opus 5\.5 $/ })).toBeDefined()
-  expect(await ui.find({ text: /sin dato/ })).toBeDefined()
   expect(await ui.find({ text: /Limpiar agentes/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('el presupuesto enseña el contexto; alto avisa, y limpiar pide confirmación', async ($, on) => {
+  mock.clock(on)
+  let usage = { startedAt: 0, context: { window: 1_000_000, tokens: 310_000, percent: 31 }, rateLimits: [] as unknown[] }
+  on('session.usage', async () => ({ value: usage }))
+  on('command.register', async () => ({ value: undefined }))
+  on('tool.register', async () => ({ value: undefined }))
+  on('agent.list', async () => ({ value: [] }))
+  on('session.start', async () => ({ cwd: 'C:/x' }))
+  on('session.measure', async ($, e) => ({ changed: e.changed }))
+  let ran = ''
+  on('command.run', async ($, e) => {
+    ran = e.command
+    return { text: '' }
+  })
+  await $.session.start({ cwd: 'C:/x' } as unknown as Parameters<typeof $.session.start>[0])
+
+  let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ text: /^Contexto$/ })).toBeDefined()
+  expect(await ui.find({ text: /310k \/ 1M/ })).toBeDefined()
+  expect(await ui.find({ text: /compactar libera espacio/ })).toBeUndefined()
+  await ui.press({ key: 'ctx-clear' })
+  expect(await ui.find({ text: /¿Borrar la conversación\?/ })).toBeDefined()
+  await ui.press({ key: 'confirm-no' })
+  expect(ran).toBe('')
+  await ui.press({ key: 'ctx-clear' })
+  await ui.press({ key: 'ctx-clear-yes' })
+  expect(ran).toBe('clear')
+  await ui.unmount()
+
+  usage = { ...usage, context: { window: 1_000_000, tokens: 820_000, percent: 82 } }
+  const measure = { ...usage, changed: ['context'] }
+  await $.session.measure(measure as unknown as Parameters<typeof $.session.measure>[0])
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ text: /Contexto al 82 %: compactar libera espacio/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('un agente se despliega con su historial, se le pregunta y se detiene con confirmación', async ($, on) => {
+  const clock = mock.clock(on)
+  on('agent.spawn', async () => ({ model: 'claude-haiku-5-5', agentId: 'h1' }))
+  on('agent.list', async () => ({ value: [{ id: 'h1', description: 'Buscar usos', type: 'Explore', status: 'running' }] }))
+  let stopped = ''
+  on('tool.call', async ($, e) => {
+    if (e.tool === 'TaskStop') stopped = String((e as unknown as { task_id?: string }).task_id)
+    return { result: 'ok' }
+  })
+  let filled = ''
+  on('prompt.read', async () => ({ value: { text: '', cursor: 0 } }))
+  on('prompt.fill', async ($, e) => {
+    filled = e.text
+    return { isFilled: true, box: { text: e.text, cursor: e.text.length } }
+  })
+  await $.agent.spawn({
+    tool_use_id: 'th', prompt: 'x', description: 'Buscar usos', subagentType: 'Explore', model: 'haiku',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: true, fork: false,
+  })
+  await clock.advance(1500)
+  await $.tool.call({ tool: 'Grep', pattern: 'formatPrice', agentId: 'h1' } as unknown as Parameters<typeof $.tool.call>[0])
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ text: /Grep "formatPrice"/ })).toBeDefined()
+  await ui.press({ key: 'open:th:1' })
+  expect(await ui.find({ text: /0:0\d  🔍 Grep/ })).toBeDefined()
+  await ui.press({ key: 'ask:th:1' })
+  expect(filled).toMatch(/¿En qué va «Buscar usos»/)
+  await ui.press({ key: 'stop:th:1' })
+  expect(await ui.find({ text: /¿Detener este agente\?/ })).toBeDefined()
+  await ui.press({ key: 'stop-yes:th:1' })
+  expect(stopped).toBe('h1')
+  await ui.unmount()
+})
+
+test('los cambios salen de git, con su diff a demanda, y lo plegado se recuerda al recargar', async ($, on) => {
+  const clock = mock.clock(on)
+  on('session.usage', async () => ({ value: { startedAt: 0, context: { window: 1 }, rateLimits: [] } }))
+  on('command.register', async () => ({ value: undefined }))
+  on('tool.register', async () => ({ value: undefined }))
+  on('agent.list', async () => ({ value: [] }))
+  on('session.start', async () => ({ cwd: 'C:/x' }))
+  on('session.cwd', async () => ({ value: 'C:/x' }))
+  on('process.run', async ($, argv) => {
+    const a = (argv as unknown as { argv: string[] }).argv.join(' ')
+    const stdout = a.includes('--numstat')
+      ? '94\t30\tsrc/search.ts\n71\t0\ttests/carrito.test.ts\n'
+      : a.includes('ls-files')
+        ? 'nuevo.md\n'
+        : '--- a/src/search.ts\n+++ b/src/search.ts\n- const rows = data.filter(fn)\n+ const rows = index.query(term)\n'
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const start = () => $.session.start({ cwd: 'C:/x' } as unknown as Parameters<typeof $.session.start>[0])
+  await start()
+  await clock.advance(1600)
+
+  let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ text: /2 archivos · 1 sin seguimiento/ })).toBeDefined()
+  expect(await ui.find({ text: /\+165/ })).toBeDefined()
+  await ui.press({ key: 'file:src/search.ts' })
+  expect(await ui.find({ text: /index\.query\(term\)/ })).toBeDefined()
+  await ui.press({ key: 'fold-changes' })
+  expect(await ui.find({ text: /carrito\.test\.ts/ })).toBeUndefined()
+  await ui.unmount()
+
+  await start()
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ text: /carrito\.test\.ts/ })).toBeUndefined()
+  expect(await ui.find({ text: /▸ Cambios/ })).toBeDefined()
   await ui.unmount()
 })

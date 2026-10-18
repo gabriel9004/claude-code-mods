@@ -22,7 +22,21 @@ export type Bot = {
   lastSeen?: number
   // Ya se avisó de su fin.
   told?: boolean
+  // Últimas acciones, para desplegar su historial: «at» en ms desde la época.
+  log?: { at: number; text: string }[]
+  // Texto final que devolvió (solo los de primer plano, al cerrar su llamada).
+  result?: string
 }
+
+// Contexto del hilo principal, como lo mide el motor.
+export type Ctx = { tokens?: number; window: number; percent?: number }
+
+// Un archivo cambiado respecto a HEAD, según git.
+export type Change = { path: string; add: number; del: number }
+export type Changes = { files: Change[]; add: number; del: number; untracked: number }
+
+// Las primeras líneas del diff de un archivo, para verlo sin salir del panel.
+export type Diff = { path: string; lines: string[] }
 
 // Una copia cargada del mod y su último latido.
 // ev: cuándo procesó su último evento de la sesión (0 si ninguno desde que arrancó).
@@ -76,6 +90,17 @@ declare module 'claude-code' {
       plegarAgentes: boolean
       plegarTareas: boolean
       verPendientes: boolean
+      plegarPresupuesto: boolean
+      plegarCambios: boolean
+      verListos: boolean
+      contexto: Ctx | null
+      cambios: Changes | null
+      diff: Diff | null
+      abierto: string | null
+      confirmar: string | null
+      ocupado: boolean
+      modelo: string
+      accion: string
     }
   }
 }
