@@ -635,3 +635,34 @@ test('los cambios salen de git, con su diff a demanda, y lo plegado se recuerda 
   expect(await ui.find({ text: /▸ Cambios/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('donde el motor no deja compactar ni limpiar, el comando queda escrito en la caja del prompt', async ($, on) => {
+  mock.clock(on)
+  on('session.usage', async () => ({ value: { startedAt: 0, context: { window: 1_000_000, tokens: 500_000, percent: 50 }, rateLimits: [] } }))
+  on('command.register', async () => ({ value: undefined }))
+  on('tool.register', async () => ({ value: undefined }))
+  on('agent.list', async () => ({ value: [] }))
+  on('session.start', async () => ({ cwd: 'C:/x' }))
+  on('session.compact', async () => {
+    throw new Error('not available in a headless session')
+  })
+  on('command.run', async () => {
+    throw new Error('not available in a headless session')
+  })
+  let box = ''
+  on('prompt.read', async () => ({ value: { text: box, cursor: box.length } }))
+  on('prompt.fill', async ($, e) => {
+    box = e.text
+    return { isFilled: true, box: { text: e.text, cursor: e.text.length } }
+  })
+  await $.session.start({ cwd: 'C:/x' } as unknown as Parameters<typeof $.session.start>[0])
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'ctx-compact' })
+  expect(box).toBe('/compact')
+  box = ''
+  await ui.press({ key: 'ctx-clear' })
+  await ui.press({ key: 'ctx-clear-yes' })
+  expect(box).toBe('/clear')
+  await ui.unmount()
+})

@@ -770,6 +770,19 @@ async function readContext($: EngineInterface, c: Ctx) {
   await update($, context, () => ({ tokens: c.tokens, window: c.window, percent: c.percent }))
 }
 
+// En la app de escritorio la sesión es de SDK: ahí el motor aún no deja a un mod compactar ni
+// limpiar. Entonces se deja el comando escrito en la caja del prompt y basta con pulsar Enter.
+async function viaPrompt($: EngineInterface, command: string): Promise<boolean> {
+  const box = await $.prompt.read().catch(() => ({ text: '', cursor: 0 }))
+  if (box.text.trim()) {
+    toast($, `Tu caja del prompt tiene texto: borra o envía antes de usar ${command}`)
+    return false
+  }
+  const r = await $.prompt.fill({ text: command }).catch(() => ({ isFilled: false }))
+  toast($, r.isFilled ? `${command} listo en la caja del prompt: pulsa Enter` : `Escribe ${command} en la caja del prompt`)
+  return r.isFilled
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     ticker = undefined
@@ -1345,7 +1358,7 @@ export const register: Register = on => {
               onPress={() => {
                 void $.session.compact({})
                   .then(r => toast($, r && 'skip' in r && r.skip ? 'Otro mod canceló la compactación' : 'Conversación compactada'))
-                  .catch(err => toast($, `No se pudo compactar: ${clip(String((err as Error)?.message ?? err), 90)}`))
+                  .catch(() => viaPrompt($, '/compact'))
               }}
             />
             <Button key="ctx-clear" label="Limpiar" onPress={() => ask('clear')} />
@@ -1361,7 +1374,7 @@ export const register: Register = on => {
               onPress={() => {
                 ask(null)
                 void $.command.run({ command: 'clear' })
-                  .catch(err => toast($, `No se pudo limpiar (${clip(String((err as Error)?.message ?? err), 70)}): escribe /clear`))
+                  .catch(() => viaPrompt($, '/clear'))
               }}
             />
             {no}
