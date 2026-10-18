@@ -1343,9 +1343,9 @@ export const register: Register = on => {
               variant={ctxHigh ? 'primary' : undefined}
               label="Compactar"
               onPress={() => {
-                void $.session.compact()
-                  .then(() => toast($, 'Conversación compactada'))
-                  .catch(() => toast($, 'No se pudo compactar ahora'))
+                void $.session.compact({})
+                  .then(r => toast($, r && 'skip' in r && r.skip ? 'Otro mod canceló la compactación' : 'Conversación compactada'))
+                  .catch(err => toast($, `No se pudo compactar: ${clip(String((err as Error)?.message ?? err), 90)}`))
               }}
             />
             <Button key="ctx-clear" label="Limpiar" onPress={() => ask('clear')} />
@@ -1361,7 +1361,7 @@ export const register: Register = on => {
               onPress={() => {
                 ask(null)
                 void $.command.run({ command: 'clear' })
-                  .catch(() => toast($, 'No se pudo limpiar: escribe /clear'))
+                  .catch(err => toast($, `No se pudo limpiar (${clip(String((err as Error)?.message ?? err), 70)}): escribe /clear`))
               }}
             />
             {no}
